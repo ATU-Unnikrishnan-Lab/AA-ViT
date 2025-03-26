@@ -4,6 +4,8 @@ checkpoints/
 # Ignore data directory (if large datasets are stored here)
 data/
 results/
+model/vit_checkpoint/imagenet21k/R50+ViT-B_16.npz
+ResVit.zip
 # Ignore any files related to logs or temporary outputs
 *.txt
 *.log
@@ -12,3 +14,4 @@ results/
 *.h5
 *.pth
 
+"model/vit_checkpoint/imagenet21k/R50+ViT-B_16.npz" 
