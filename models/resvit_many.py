@@ -1,0 +1,262 @@
+import torch
+from collections import OrderedDict
+from torch.autograd import Variable
+import util.util as util
+from util.image_pool import ImagePool
+from .base_model import BaseModel
+from . import networks
+from torchvision import models
+import numpy as np
+import torchvision.transforms as transforms
+from skimage.metrics import peak_signal_noise_ratio as psnr
+from skimage.metrics import structural_similarity as ssim
+
+class ResViT_model(BaseModel):
+    def name(self):
+        return 'ResViT_model'
+
+    def initialize(self, opt):
+        BaseModel.initialize(self, opt)
+        self.isTrain = opt.isTrain
+        self.psnr_values = []  # Store PSNR for all images
+        self.ssim_values = []  # Store SSIM for all images
+
+        # load/define networks
+        self.netG = networks.define_G(2, opt.output_nc, opt.ngf,
+                                      opt.which_model_netG,opt.vit_name,opt.fineSize,opt.pre_trained_path, opt.norm, not opt.no_dropout, opt.init_type, self.gpu_ids,
+                                      pre_trained_trans=opt.pre_trained_transformer,pre_trained_resnet = opt.pre_trained_resnet)
+
+
+        if self.isTrain:
+            self.lambda_f = opt.lambda_f
+            use_sigmoid = opt.no_lsgan
+            self.netD = networks.define_D(opt.input_nc + opt.output_nc-1, opt.ndf,
+                                          opt.which_model_netD,opt.vit_name,opt.fineSize,
+                                          opt.n_layers_D, opt.norm, use_sigmoid, opt.init_type, self.gpu_ids)
+        if not self.isTrain or opt.continue_train:
+            self.load_network(self.netG, 'G', opt.which_epoch)
+            if self.isTrain:
+                self.load_network(self.netD, 'D', opt.which_epoch)
+
+        if self.isTrain:
+            self.fake_AB_pool = ImagePool(opt.pool_size)
+            # define loss functions
+            self.criterionGAN = networks.GANLoss(use_lsgan=not opt.no_lsgan, tensor=self.Tensor)
+            self.criterionL1 = torch.nn.L1Loss()
+            # initialize optimizers
+            self.schedulers = []
+            self.optimizers = []
+
+            self.optimizer_G = torch.optim.Adam(self.netG.parameters(),
+                                                lr=opt.lr, betas=(opt.beta1, 0.999))
+            self.optimizer_D = torch.optim.Adam(self.netD.parameters(),
+                                                lr=opt.lr, betas=(opt.beta1, 0.999))
+            self.optimizers.append(self.optimizer_G)
+            self.optimizers.append(self.optimizer_D)
+            for optimizer in self.optimizers:
+                self.schedulers.append(networks.get_scheduler(optimizer, opt))
+
+        print('---------- Networks initialized -------------')
+        networks.print_network(self.netG)
+        if self.isTrain:
+            networks.print_network(self.netD)
+        print('-----------------------------------------------')
+
+    #  my changes here
+    # def set_input(self, input):
+    #     AtoB = self.opt.which_direction == 'AtoB'
+    #     input_A = input['A' if AtoB else 'B']  # Input channels (3 channels)
+    #     input_B = input['B' if AtoB else 'A']  # Ground truth (1 channel)
+
+    #     if len(self.gpu_ids) > 0:
+    #         input_A = input_A.cuda(self.gpu_ids[0], non_blocking=True)
+    #         input_B = input_B.cuda(self.gpu_ids[0], non_blocking=True)
+
+    #     self.input_A = input_A
+    #     self.input_B = input_B
+    #     self.image_paths = input['A_paths' if AtoB else 'B_paths']
+
+
+
+    def set_input(self, input):
+        AtoB = self.opt.which_direction == 'AtoB'
+        input_A = input['A' if AtoB else 'B']
+        input_B = input['B' if AtoB else 'A']
+        if len(self.gpu_ids) > 0:
+            input_A = input_A.cuda(self.gpu_ids[0], non_blocking=True)
+            input_B = input_B.cuda(self.gpu_ids[0], non_blocking=True)
+        self.input_A = input_A
+        self.input_B = input_B
+        self.image_paths = input['A_paths' if AtoB else 'B_paths']
+
+    # my changes here
+
+    # def forward(self):
+    #     self.real_A = Variable(self.input_A)   # 3 channels input
+    #     self.fake_B = self.netG(self.real_A[:, 0:3, :, :])  # Use first 3 channels for input
+    #     self.real_B = Variable(self.input_B)   # 4th channel as ground truth
+
+    def forward(self):
+        self.real_A = Variable(self.input_A)
+        self.fake_B= self.netG(self.real_A[:,0:2,:,:])
+        self.real_B = Variable(self.input_B)
+
+    def test(self):
+        with torch.no_grad():
+            self.real_A = Variable(self.input_A)
+            self.fake_B = self.netG(self.real_A[:, 0:2, :, :])
+            self.real_B = Variable(self.input_B)
+
+            # Convert tensors to numpy
+            fake_B_np = self.fake_B.cpu().numpy().squeeze()
+            real_B_np = self.real_B.cpu().numpy().squeeze()
+
+            # Convert [-1, 1] range to [0, 1]
+            fake_B_np = (fake_B_np + 1) / 2
+            real_B_np = (real_B_np + 1) / 2
+
+            # Clip to ensure values are strictly in [0, 1]
+            fake_B_np = np.clip(fake_B_np, 0, 1)
+            real_B_np = np.clip(real_B_np, 0, 1)
+
+            # Handle zero-max cases before PSNR computation
+            if real_B_np.max() <= 0 or fake_B_np.max() <= 0:
+                return  # Skip this image
+
+            # Compute PSNR and SSIM
+            psnr_value = psnr(real_B_np, fake_B_np, data_range=1.0)
+            ssim_value = ssim(real_B_np, fake_B_np, data_range=1.0, multichannel=True)
+
+            # Store values for averaging
+            self.psnr_values.append(psnr_value)
+            self.ssim_values.append(ssim_value)
+
+            print(f"Image {len(self.psnr_values)} | PSNR: {psnr_value}, SSIM: {ssim_value}")
+
+
+
+
+    def compute_final_metrics(self):
+        """Compute and print average and standard deviation for PSNR & SSIM after all images are processed."""
+        
+        if self.psnr_values and self.ssim_values:
+            # Convert lists to PyTorch tensors
+            psnr_tensor = torch.tensor(self.psnr_values, dtype=torch.float32)
+            ssim_tensor = torch.tensor(self.ssim_values, dtype=torch.float32)
+
+            # Create masks for finite values (excludes `inf` and `NaN`)
+            psnr_finite_mask = torch.isfinite(psnr_tensor)
+            ssim_finite_mask = torch.isfinite(ssim_tensor)
+
+            # Filter out `inf` and `NaN` values using the masks
+            psnr_filtered = psnr_tensor[psnr_finite_mask]
+            ssim_filtered = ssim_tensor[ssim_finite_mask]
+
+            # Compute mean and std for PSNR (only on finite values)
+            avg_psnr = torch.mean(psnr_filtered) if psnr_filtered.numel() > 0 else torch.tensor(float('nan'))
+            std_psnr = torch.std(psnr_filtered) if psnr_filtered.numel() > 0 else torch.tensor(float('nan'))
+
+            # Compute mean and std for SSIM (only on finite values)
+            avg_ssim = torch.mean(ssim_filtered) if ssim_filtered.numel() > 0 else torch.tensor(float('nan'))
+            std_ssim = torch.std(ssim_filtered) if ssim_filtered.numel() > 0 else torch.tensor(float('nan'))
+
+            print(f"\nFinal Average PSNR: {avg_psnr.item():.3f} ± {std_psnr.item():.3f}, Final Average SSIM: {avg_ssim.item():.3f} ± {std_ssim.item():.3f}\n")
+
+
+
+
+
+    # def compute_final_metrics(self):
+    #     """Compute and print average and standard deviation for PSNR & SSIM after all images are processed."""
+    #     if self.psnr_values and self.ssim_values:
+    #         avg_psnr = np.mean(self.psnr_values)
+    #         std_psnr = np.std(self.psnr_values)
+
+    #         avg_ssim = np.mean(self.ssim_values)
+    #         std_ssim = np.std(self.ssim_values)
+
+    #         print(f"\nFinal Average PSNR: {avg_psnr:.3f} ± {std_psnr:.3f}, Final Average SSIM: {avg_ssim:.3f} ± {std_ssim:.3f}\n")
+
+
+    # get image paths
+    def get_image_paths(self):
+        return self.image_paths
+
+    def backward_D(self):
+        # Fake
+        # stop backprop to the generator by detaching fake_B
+        fake_AB = self.fake_AB_pool.query(torch.cat((self.real_A[:,0:2,:,:], self.fake_B), 1).data)
+        pred_fake = self.netD(fake_AB.detach())
+        self.loss_D_fake = self.criterionGAN(pred_fake, False) #
+        # Real
+        real_AB = torch.cat((self.real_A[:,0:2,:,:], self.real_B), 1)
+        pred_real = self.netD(real_AB)
+        self.loss_D_real = self.criterionGAN(pred_real, True)
+        # Combined loss
+        self.loss_D = (self.loss_D_fake + self.loss_D_real) * 0.5*self.opt.lambda_adv
+
+        self.loss_D.backward()
+
+        
+    def backward_G(self):
+        # First, G(A) should fake the discriminator
+        fake_AB = torch.cat((self.real_A[:,0:2,:,:], self.fake_B), 1)
+        pred_fake = self.netD(fake_AB)
+        self.loss_G_GAN = self.criterionGAN(pred_fake, True)*self.opt.lambda_adv
+        # Second, G(A) = B
+        self.loss_G_L1 = self.criterionL1(self.fake_B, self.real_B) * self.opt.lambda_A
+        self.loss_G = self.loss_G_GAN + self.loss_G_L1*1
+        
+        self.loss_G.backward()
+
+    def optimize_parameters(self):
+        self.forward()
+
+        self.optimizer_D.zero_grad()
+        self.backward_D()
+        self.optimizer_D.step()
+
+        self.optimizer_G.zero_grad()
+        self.backward_G()
+        self.optimizer_G.step()
+
+    def get_current_errors(self):
+        return OrderedDict([('G_GAN', self.loss_G_GAN.item()),
+                            ('G_L1', self.loss_G_L1.item()),
+                            ('D_real', self.loss_D_real.item()),
+                            ('D_fake', self.loss_D_fake.item())
+
+                            ])
+
+    # def get_current_visuals(self):
+    #     real_A = util.tensor2im(self.real_A.data)
+    #     fake_B = util.tensor2im(self.fake_B.data)
+    #     real_B = util.tensor2im(self.real_B.data)
+    #     return OrderedDict([('input', real_A), ('Pred_T1ce', fake_B), ('Real_T1ce', real_B)])
+
+    def get_current_visuals(self):
+        real_A = util.tensor2im(self.real_A.data)
+        # real_T1 = np.stack([real_A[:, :, 0], real_A[:, :, 1], real_A[:, :, 0]], axis=-1)  # Shape (256, 256, 3)
+        # real_T2 = np.stack([real_A[:, :, 1], real_A[:, :, 0], real_A[:, :, 0]], axis=-1)  # Shape (256, 256, 3)
+        # Extract T1 and T2 from real_A
+        T1 = real_A[:, :, 0]  # First channel
+        T2 = real_A[:, :, 1]  # Second channel
+        # Flair = real_A[:, :, 3] 
+
+        # Map to RGB representations
+        real_T1 = np.stack([T1, T1, T1], axis=-1)  # Grayscale as RGB
+        real_T2 = np.stack([T2, T2, T2], axis=-1)  # Grayscale as RGB
+        # real_Flair = np.stack([Flair, Flair, Flair], axis=-1)  # Grayscale as RGB
+        
+        # T1_flipped = np.flip(real_T1, axis=1)  # Flip along width (horizontal flip)
+        # T2_flipped = np.flip(real_T2, axis=1)  # Flip along width
+        # Flair_flipped = np.flip(real_Flair, axis=1)  # Flip along width
+
+        fake_B = util.tensor2im(self.fake_B.data)
+        real_B = util.tensor2im(self.real_B.data)
+        return OrderedDict([('T1', real_T1),('T2', real_T2), ('Pred_T1ce', fake_B), ('real_T1ce', real_B)])
+
+
+    def save(self, label):
+        self.save_network(self.netG, 'G', label, self.gpu_ids)
+        self.save_network(self.netD, 'D', label, self.gpu_ids)

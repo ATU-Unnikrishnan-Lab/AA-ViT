@@ -1,0 +1,96 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python Debugger: Python File",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "args": [
+
+                    // pre-traininig part
+                      "--dataroot", "C:/Users/TalhaMeraj-RESEARCH/OneDrive - Atlantic TU/Desktop/Talha/BRATS/2D_RGB_processed/T1_T2_T1ce", 
+
+                      // "--batchSize","32",
+                      // "--name", "T1_T2_T1ce_pretrained_batch_32_processed_nc2_orientation",
+                      // "--gpu_ids", "0",
+                      // "--model", "resvit_many",
+                      // "--which_model_netG", "res_cnn",
+                      // "--which_direction", "AtoB",
+                      // "--lambda_A", "100",
+                      // "--dataset_mode", "aligned",
+                      // "--norm", "batch",
+                      // "--pool_size", "0",
+                      // "--output_nc", "1",
+                      // "--input_nc", "2",
+                      // "--loadSize", "256",
+                      // "--fineSize", "256",
+                      // "--niter", "50",
+                      // "--niter_decay", "50",
+                      // "--save_epoch_freq", "5",
+                      // "--checkpoints_dir", "checkpoints/",
+                      // "--display_id", "0",
+                      // "--lr", "0.0002",
+                      // "--resize_or_crop", "none",
+
+
+                    
+                      // fine-tunning or training part
+                      "--name", "T1_T2_T1ce_batch_32_processed_nc2_oreintation",
+                      "--batchSize","32",
+                      "--gpu_ids", "0",
+                      "--model", "resvit_many",
+                      "--which_model_netG", "resvit",
+                      "--which_direction", "AtoB",
+                      "--lambda_A", "100",
+                      "--dataset_mode", "aligned",
+                      "--norm", "batch",
+                      "--pool_size", "0",
+                      "--output_nc", "1",
+                      "--input_nc", "2",
+                      "--loadSize", "256",
+                      "--fineSize", "256",
+                      "--niter", "50",
+                      "--niter_decay", "50",
+                      "--save_epoch_freq", "5",
+                      "--checkpoints_dir", "checkpoints/",
+                      "--display_id", "0",
+                      "--pre_trained_transformer", "1",
+                      "--pre_trained_resnet", "1",
+                      "--pre_trained_path", "checkpoints/T1_T2_T1ce_pretrained_batch_32_processed_nc2_orientation/latest_net_G.pth",
+                      "--lr", "0.0001",
+                      // "--resize_or_crop","scale_width",
+
+                    //   "--epoch_count", "48",
+                    //   "--which_epoch","latest",
+                    //   "--continue_train",
+
+
+
+                      // testing of new trained 
+                      // "--dataroot", "C:/Users/TalhaMeraj-RESEARCH/OneDrive - Atlantic TU/Desktop/Talha/BRATS/2D_RGB/T1_T2_T1ce",
+                      // "--name", "T1_T2_T1ce_batch_32_processed_nc2",
+                      // "--gpu_ids", "0",
+                      // "--model", "resvit_many",
+                      // "--which_model_netG", "resvit",
+                      // "--dataset_mode", "aligned",
+                      // "--norm", "batch",
+                      // "--phase", "test",
+                      // "--output_nc", "1",
+                      // "--input_nc", "2",
+                      // "--how_many", "10000",
+                      // "--serial_batches",
+                      // "--fineSize", "256",
+                      // "--loadSize", "256",
+                      // "--results_dir", "results/",
+                      // "--checkpoints_dir", "checkpoints/",
+                      // // "--pre_trained_transformer", "0",
+                      // // "--pre_trained_path", "checkpoints/T1_T2_T1ce_subset_pre_trained/latest_net_G.pth", 
+                      // "--which_epoch", "latest"
+            ]
+        }
+    ]
+}

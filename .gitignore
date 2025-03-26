@@ -1,0 +1,14 @@
+# Ignore checkpoints directory
+checkpoints/
+
+# Ignore data directory (if large datasets are stored here)
+data/
+results/
+# Ignore any files related to logs or temporary outputs
+*.txt
+*.log
+
+# Ignore weights and model files (if they are saved with extensions like .h5, .pth, etc.)
+*.h5
+*.pth
+
