@@ -15,3 +15,4 @@ ResVit.zip
 *.pth
 
 "model/vit_checkpoint/imagenet21k/R50+ViT-B_16.npz" 
+"model/vit_checkpoint/imagenet21k/R50+ViT-B_16.npz" 
