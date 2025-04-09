@@ -23,6 +23,8 @@ def overlay_saliency_on_pred(pred, saliency):
     saliency: [H, W] saliency normalized to [0, 1]
     Returns: [H, W, 3] RGB image with saliency overlay
     """
+    plt.ioff()
+
     pred = np.squeeze(pred)
     saliency = np.squeeze(saliency)
 
@@ -43,6 +45,7 @@ def overlay_saliency_on_pred(pred, saliency):
     saliency_overlay = Image.open(buf).convert("RGB")
     saliency_overlay = np.array(saliency_overlay)
     plt.close(fig)
+
     return saliency_overlay
 
 
@@ -174,7 +177,7 @@ class ResViT_model(BaseModel):
     #         print(f"Image {len(self.psnr_values)} | PSNR: {psnr_value}, SSIM: {ssim_value}")
 
 
-    def test(self, compute_saliency=False):
+    def test(self, compute_saliency=True):
         self.saliency = None  # Reset saliency before computation
 
         if compute_saliency:
