@@ -15,7 +15,7 @@
                       "--dataroot", "C:/Users/TalhaMeraj-RESEARCH/OneDrive - Atlantic TU/Desktop/Talha/BRATS/2D_RGB_processed/T1_T2_T1ce", 
 
                       // "--batchSize","32",
-                      // "--name", "T1_T2_T1ce_pretrained_batch_32_processed_nc2_orientation",
+                      // "--name", "T2_Flair_T1ce_pretrained_batch_32_processed_nc2_orientation",
                       // "--gpu_ids", "0",
                       // "--model", "resvit_many",
                       // "--which_model_netG", "res_cnn",
@@ -39,7 +39,7 @@
 
                     
                       // fine-tunning or training part
-                      "--name", "T1_T2_T1ce_batch_32_processed_nc2_oreintation",
+                      "--name", "T1_T2_T1ce_batch_1_temp",
                       "--batchSize","32",
                       "--gpu_ids", "0",
                       "--model", "resvit_many",
@@ -72,7 +72,7 @@
 
                       // testing of new trained 
                       // "--dataroot", "C:/Users/TalhaMeraj-RESEARCH/OneDrive - Atlantic TU/Desktop/Talha/BRATS/2D_RGB/T1_T2_T1ce",
-                      // "--name", "T1_T2_T1ce_batch_32_processed_nc2",
+                      // "--name", "T1_T2_T1ce_batch_32_processed_nc2_oreintation",
                       // "--gpu_ids", "0",
                       // "--model", "resvit_many",
                       // "--which_model_netG", "resvit",

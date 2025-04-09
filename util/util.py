@@ -28,9 +28,36 @@ def diagnose_network(net, name='network'):
     print(mean)
 
 
+# def save_image(image_numpy, image_path):
+#     # If the image is a batch of images (e.g., (32, 1, 256, 256) or (32, 256, 256)), select the first one
+#     if image_numpy.ndim == 4:  # Case where batch size is 32 and channel dimension is present, e.g., (32, 1, 256, 256)
+#         image_numpy = image_numpy[0]  # Select the first image from the batch
+#     elif image_numpy.ndim == 3 and image_numpy.shape[0] == 32:  # Case where the shape is (32, 256, 256)
+#         image_numpy = image_numpy[0]  # Select the first image from the batch
+
+#     # If the image is a grayscale or RGB image, ensure the shape is (256, 256) or (256, 256, 3)
+#     if image_numpy.ndim == 3 and image_numpy.shape[0] == 1:
+#         image_numpy = image_numpy[0]  # Remove the singleton dimension (1, 256, 256) → (256, 256)
+
+#     # Convert to uint8 if not already
+#     if image_numpy.dtype != np.uint8:
+#         image_numpy = (image_numpy * 255).astype(np.uint8)  # Assuming the range is [0, 1]
+
+#     # Ensure it's at least 2D (H, W) or (H, W, 3)
+#     if image_numpy.ndim == 2:
+#         image_pil = Image.fromarray(image_numpy)  # Grayscale
+#     elif image_numpy.ndim == 3 and image_numpy.shape[2] == 3:
+#         image_pil = Image.fromarray(image_numpy)  # RGB image
+#     else:
+#         raise ValueError(f"Unsupported image shape: {image_numpy.shape}")
+
+#     # Save the image
+#     image_pil.save(image_path)
 def save_image(image_numpy, image_path):
     image_pil = Image.fromarray(image_numpy)
     image_pil.save(image_path)
+
+
 
 
 def print_numpy(x, val=True, shp=False):

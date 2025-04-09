@@ -8,6 +8,58 @@ import numpy as np, h5py
 from skimage.metrics import peak_signal_noise_ratio as psnr
 
 import os
+import matplotlib.pyplot as plt
+
+import os
+import matplotlib.pyplot as plt
+
+import matplotlib.pyplot as plt
+import os
+import numpy as np
+
+# def visualize_results(fake_B, real_B, diff_map, saliency, epoch, save_dir):
+#     os.makedirs(save_dir, exist_ok=True)  # Ensure save directory exists
+
+#     if saliency is None:
+#         fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+#         titles = ["Predicted T1ce", "Real T1ce", "Difference Map"]
+#         images = [fake_B, real_B, diff_map]
+#         save_path = os.path.join(save_dir, f"epoch_{epoch}.png")
+
+#         for i, ax in enumerate(axes):
+#             ax.imshow(images[i], cmap="gray")
+#             ax.set_title(titles[i])
+#             ax.axis("off")
+#     else:
+#         # Normalize saliency map to [0, 1]
+#         saliency = np.squeeze(saliency)
+#         saliency_norm = (saliency - saliency.min()) / (saliency.max() - saliency.min() + 1e-8)
+
+#         fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+#         titles = ["Predicted T1ce", "Real T1ce", "Difference Map", "Saliency Overlay"]
+#         images = [fake_B, real_B, diff_map]
+
+#         # Display standard grayscale images
+#         for i in range(3):
+#             axes[i].imshow(images[i], cmap="gray")
+#             axes[i].set_title(titles[i])
+#             axes[i].axis("off")
+
+#         # Overlay saliency on top of fake_B (predicted image)
+#         axes[3].imshow(np.squeeze(fake_B), cmap="gray")
+#         axes[3].imshow(saliency_norm, cmap="jet", alpha=0.5)
+#         axes[3].set_title(titles[3])
+#         axes[3].axis("off")
+
+#         save_path = os.path.join(save_dir, f"epoch_{epoch}_saliency.png")
+
+#     plt.tight_layout()
+#     plt.savefig(save_path)
+#     plt.close()
+
+
+
+
 def print_log(logger,message):
     print(message, flush=True)
     if logger:
@@ -100,7 +152,7 @@ if __name__ == '__main__':
 #        		    
                 model.set_input(data_val)
 #        		    
-                model.test()
+                fake_B_np, real_B_np, diff_map, _ = model.test(compute_saliency=True)
 #        		    
                 fake_im=model.fake_B.cpu().data.numpy()
 #        		    
@@ -113,7 +165,8 @@ if __name__ == '__main__':
                     continue
                 L1_avg[epoch-1,i]=abs(fake_im-real_im).mean()
                 psnr_avg[epoch-1,i]=psnr(fake_im/fake_im.max(),real_im/real_im.max())
-#                  
+#               
+#    
 #                 
             l1_avg_loss = np.mean(L1_avg[epoch-1])
 #                
@@ -132,6 +185,8 @@ if __name__ == '__main__':
             model.save('latest')
 #        		   
             model.save(epoch)
+            # visualize_results(fake_B_np[0], real_B_np[0], diff_map[0], _[0], epoch, save_dir)
+
 
         print('End of epoch %d / %d \t Time Taken: %d sec' %
               (epoch, opt.niter + opt.niter_decay, time.time() - epoch_start_time))

@@ -11,6 +11,42 @@ import torchvision.transforms as transforms
 from skimage.metrics import peak_signal_noise_ratio as psnr
 from skimage.metrics import structural_similarity as ssim
 
+import matplotlib.pyplot as plt
+import numpy as np
+from io import BytesIO
+from collections import OrderedDict
+from PIL import Image
+
+def overlay_saliency_on_pred(pred, saliency):
+    """
+    pred: [H, W] or [H, W, 3] image (grayscale or RGB)
+    saliency: [H, W] saliency normalized to [0, 1]
+    Returns: [H, W, 3] RGB image with saliency overlay
+    """
+    pred = np.squeeze(pred)
+    saliency = np.squeeze(saliency)
+
+    # Normalize saliency map
+    saliency_norm = (saliency - saliency.min()) / (saliency.max() - saliency.min() + 1e-8)
+
+    # Create plot and overlay
+    fig, ax = plt.subplots(figsize=(3, 3), dpi=100)
+    ax.imshow(pred, cmap='gray')
+    ax.imshow(saliency_norm, cmap='jet', alpha=0.5)
+    ax.axis("off")
+    fig.tight_layout(pad=0)
+
+    # Convert matplotlib figure to image array
+    buf = BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
+    buf.seek(0)
+    saliency_overlay = Image.open(buf).convert("RGB")
+    saliency_overlay = np.array(saliency_overlay)
+    plt.close(fig)
+    return saliency_overlay
+
+
+
 class ResViT_model(BaseModel):
     def name(self):
         return 'ResViT_model'
@@ -25,7 +61,8 @@ class ResViT_model(BaseModel):
         self.netG = networks.define_G(2, opt.output_nc, opt.ngf,
                                       opt.which_model_netG,opt.vit_name,opt.fineSize,opt.pre_trained_path, opt.norm, not opt.no_dropout, opt.init_type, self.gpu_ids,
                                       pre_trained_trans=opt.pre_trained_transformer,pre_trained_resnet = opt.pre_trained_resnet)
-
+        # Initialize attributes
+        self.saliency = None  # Ensure this attribute always exists
 
         if self.isTrain:
             self.lambda_f = opt.lambda_f
@@ -62,21 +99,6 @@ class ResViT_model(BaseModel):
             networks.print_network(self.netD)
         print('-----------------------------------------------')
 
-    #  my changes here
-    # def set_input(self, input):
-    #     AtoB = self.opt.which_direction == 'AtoB'
-    #     input_A = input['A' if AtoB else 'B']  # Input channels (3 channels)
-    #     input_B = input['B' if AtoB else 'A']  # Ground truth (1 channel)
-
-    #     if len(self.gpu_ids) > 0:
-    #         input_A = input_A.cuda(self.gpu_ids[0], non_blocking=True)
-    #         input_B = input_B.cuda(self.gpu_ids[0], non_blocking=True)
-
-    #     self.input_A = input_A
-    #     self.input_B = input_B
-    #     self.image_paths = input['A_paths' if AtoB else 'B_paths']
-
-
 
     def set_input(self, input):
         AtoB = self.opt.which_direction == 'AtoB'
@@ -89,49 +111,125 @@ class ResViT_model(BaseModel):
         self.input_B = input_B
         self.image_paths = input['A_paths' if AtoB else 'B_paths']
 
-    # my changes here
 
-    # def forward(self):
-    #     self.real_A = Variable(self.input_A)   # 3 channels input
-    #     self.fake_B = self.netG(self.real_A[:, 0:3, :, :])  # Use first 3 channels for input
-    #     self.real_B = Variable(self.input_B)   # 4th channel as ground truth
-
-    def forward(self):
+    def forward(self, compute_saliency=True):
+        # Forward pass through the generator
         self.real_A = Variable(self.input_A)
-        self.fake_B= self.netG(self.real_A[:,0:2,:,:])
-        self.real_B = Variable(self.input_B)
+        self.fake_B = self.netG(self.real_A[:, 0:2, :, :])  # Generate fake B from real A
+        self.real_B = Variable(self.input_B)  # Ground truth B (real B)
 
-    def test(self):
-        with torch.no_grad():
-            self.real_A = Variable(self.input_A)
+        # If we need to compute saliency, do it here
+        if compute_saliency:
+            # Enable gradient tracking for saliency computation
+            self.real_A.requires_grad = True  # Ensure gradients can be computed
+            
+            # Recompute the fake B with gradient tracking enabled
             self.fake_B = self.netG(self.real_A[:, 0:2, :, :])
-            self.real_B = Variable(self.input_B)
 
-            # Convert tensors to numpy
-            fake_B_np = self.fake_B.cpu().numpy().squeeze()
-            real_B_np = self.real_B.cpu().numpy().squeeze()
+            # Compute MSE loss for saliency
+            loss = torch.nn.functional.mse_loss(self.fake_B, self.real_B)
 
-            # Convert [-1, 1] range to [0, 1]
-            fake_B_np = (fake_B_np + 1) / 2
-            real_B_np = (real_B_np + 1) / 2
+            # Compute gradients of the loss with respect to the input (real_A)
+            gradients = torch.autograd.grad(outputs=loss, inputs=self.real_A, create_graph=False, retain_graph=True)[0]
 
-            # Clip to ensure values are strictly in [0, 1]
-            fake_B_np = np.clip(fake_B_np, 0, 1)
-            real_B_np = np.clip(real_B_np, 0, 1)
+            # Compute saliency: absolute gradients for each pixel in the image
+            saliency = gradients.abs().mean(dim=1).cpu().numpy().squeeze()  # Mean across channels
 
-            # Handle zero-max cases before PSNR computation
-            if real_B_np.max() <= 0 or fake_B_np.max() <= 0:
-                return  # Skip this image
+            if saliency.max() > 0 and saliency.max() != saliency.min():
+                self.saliency = (saliency - saliency.min()) / (saliency.max() - saliency.min())
+            else:
+                self.saliency = np.zeros_like(saliency)
 
-            # Compute PSNR and SSIM
-            psnr_value = psnr(real_B_np, fake_B_np, data_range=1.0)
-            ssim_value = ssim(real_B_np, fake_B_np, data_range=1.0, multichannel=True)
 
-            # Store values for averaging
-            self.psnr_values.append(psnr_value)
-            self.ssim_values.append(ssim_value)
+    # def test(self):
+    #     with torch.no_grad():
+    #         self.real_A = Variable(self.input_A)
+    #         self.fake_B = self.netG(self.real_A[:, 0:2, :, :])
+    #         self.real_B = Variable(self.input_B)
 
-            print(f"Image {len(self.psnr_values)} | PSNR: {psnr_value}, SSIM: {ssim_value}")
+    #         # Convert tensors to numpy
+    #         fake_B_np = self.fake_B.cpu().numpy().squeeze()
+    #         real_B_np = self.real_B.cpu().numpy().squeeze()
+
+    #         # Convert [-1, 1] range to [0, 1]
+    #         fake_B_np = (fake_B_np + 1) / 2
+    #         real_B_np = (real_B_np + 1) / 2
+
+    #         # Clip to ensure values are strictly in [0, 1]
+    #         fake_B_np = np.clip(fake_B_np, 0, 1)
+    #         real_B_np = np.clip(real_B_np, 0, 1)
+
+    #         # Handle zero-max cases before PSNR computation
+    #         if real_B_np.max() <= 0 or fake_B_np.max() <= 0:
+    #             return  # Skip this image
+
+    #         # Compute PSNR and SSIM
+    #         psnr_value = psnr(real_B_np, fake_B_np, data_range=1.0)
+    #         ssim_value = ssim(real_B_np, fake_B_np, data_range=1.0, multichannel=True)
+
+    #         # Store values for averaging
+    #         self.psnr_values.append(psnr_value)
+    #         self.ssim_values.append(ssim_value)
+
+    #         print(f"Image {len(self.psnr_values)} | PSNR: {psnr_value}, SSIM: {ssim_value}")
+
+
+    def test(self, compute_saliency=False):
+        self.saliency = None  # Reset saliency before computation
+
+        if compute_saliency:
+            # Enable gradient tracking
+            self.real_A = self.input_A.clone().detach().requires_grad_(True)
+            self.real_B = self.input_B
+            self.fake_B = self.netG(self.real_A[:, 0:2, :, :])
+
+            loss = torch.nn.functional.mse_loss(self.fake_B, self.real_B)
+            gradients = torch.autograd.grad(outputs=loss, inputs=self.real_A, create_graph=False, retain_graph=True)[0]
+            saliency = gradients.abs().mean(dim=1).cpu().numpy().squeeze()
+
+            if saliency.max() > 0:
+                self.saliency = (saliency - saliency.min()) / (saliency.max() - saliency.min())
+
+        else:
+            with torch.no_grad():
+                self.real_A = self.input_A
+                self.fake_B = self.netG(self.real_A[:, 0:2, :, :])
+                self.real_B = self.input_B
+
+        # Detach tensors and convert to numpy for visualization
+        fake_B_np = self.fake_B.detach().cpu().numpy().squeeze()
+        real_B_np = self.real_B.detach().cpu().numpy().squeeze()
+
+        # Normalize from [-1, 1] range to [0, 1]
+        fake_B_np = (fake_B_np + 1) / 2
+        real_B_np = (real_B_np + 1) / 2
+
+        # Clip to ensure values are strictly in [0, 1]
+        fake_B_np = np.clip(fake_B_np, 0, 1)
+        real_B_np = np.clip(real_B_np, 0, 1)
+
+        # Handle zero-max cases before PSNR computation
+        if real_B_np.max() <= 0 or fake_B_np.max() <= 0:
+            return  # Skip this image if there's no valid data
+
+        # Compute PSNR and SSIM
+        psnr_value = psnr(real_B_np, fake_B_np, data_range=1.0)
+        ssim_value = ssim(real_B_np, fake_B_np, data_range=1.0, multichannel=True)
+
+        # Store values for averaging
+        self.psnr_values.append(psnr_value)
+        self.ssim_values.append(ssim_value)
+
+        # Compute Difference Map
+        diff_map = np.abs(fake_B_np - real_B_np)
+        # Normalize difference map to [0, 1] for visualization
+        diff_map = np.clip(diff_map / diff_map.max(), 0, 1)
+
+        print(f"Image {len(self.psnr_values)} | PSNR: {psnr_value}, SSIM: {ssim_value}")
+
+        # Return necessary data for visualization and further processing
+        return fake_B_np, real_B_np, diff_map, self.saliency
+
 
 
 
@@ -161,22 +259,6 @@ class ResViT_model(BaseModel):
             std_ssim = torch.std(ssim_filtered) if ssim_filtered.numel() > 0 else torch.tensor(float('nan'))
 
             print(f"\nFinal Average PSNR: {avg_psnr.item():.3f} ± {std_psnr.item():.3f}, Final Average SSIM: {avg_ssim.item():.3f} ± {std_ssim.item():.3f}\n")
-
-
-
-
-
-    # def compute_final_metrics(self):
-    #     """Compute and print average and standard deviation for PSNR & SSIM after all images are processed."""
-    #     if self.psnr_values and self.ssim_values:
-    #         avg_psnr = np.mean(self.psnr_values)
-    #         std_psnr = np.std(self.psnr_values)
-
-    #         avg_ssim = np.mean(self.ssim_values)
-    #         std_ssim = np.std(self.ssim_values)
-
-    #         print(f"\nFinal Average PSNR: {avg_psnr:.3f} ± {std_psnr:.3f}, Final Average SSIM: {avg_ssim:.3f} ± {std_ssim:.3f}\n")
-
 
     # get image paths
     def get_image_paths(self):
@@ -228,33 +310,117 @@ class ResViT_model(BaseModel):
 
                             ])
 
+
     # def get_current_visuals(self):
     #     real_A = util.tensor2im(self.real_A.data)
+    #     # real_T1 = np.stack([real_A[:, :, 0], real_A[:, :, 1], real_A[:, :, 0]], axis=-1)  # Shape (256, 256, 3)
+    #     # real_T2 = np.stack([real_A[:, :, 1], real_A[:, :, 0], real_A[:, :, 0]], axis=-1)  # Shape (256, 256, 3)
+    #     # Extract T1 and T2 from real_A
+    #     T1 = real_A[:, :, 0]  # First channel
+    #     T2 = real_A[:, :, 1]  # Second channel
+    #     # Flair = real_A[:, :, 3] 
+
+    #     # Map to RGB representations
+    #     real_T1 = np.stack([T1, T1, T1], axis=-1)  # Grayscale as RGB
+    #     real_T2 = np.stack([T2, T2, T2], axis=-1)  # Grayscale as RGB
+    #     # real_Flair = np.stack([Flair, Flair, Flair], axis=-1)  # Grayscale as RGB
+        
+    #     # T1_flipped = np.flip(real_T1, axis=1)  # Flip along width (horizontal flip)
+    #     # T2_flipped = np.flip(real_T2, axis=1)  # Flip along width
+    #     # Flair_flipped = np.flip(real_Flair, axis=1)  # Flip along width
+
     #     fake_B = util.tensor2im(self.fake_B.data)
     #     real_B = util.tensor2im(self.real_B.data)
-    #     return OrderedDict([('input', real_A), ('Pred_T1ce', fake_B), ('Real_T1ce', real_B)])
+    #     return OrderedDict([('T1', real_T1),('T2', real_T2), ('Pred_T1ce', fake_B), ('real_T1ce', real_B)])
+
+
+
+    # def get_current_visuals(self):
+    #     real_A = util.tensor2im(self.real_A.data)
+
+    #     # Extract T1 and T2
+    #     T1 = real_A[:, :, 0]
+    #     T2 = real_A[:, :, 1]
+
+    #     real_T1 = np.stack([T1, T1, T1], axis=-1)
+    #     real_T2 = np.stack([T2, T2, T2], axis=-1)
+
+    #     fake_B = util.tensor2im(self.fake_B.data)
+    #     real_B = util.tensor2im(self.real_B.data)
+
+    #     diff_map = np.abs(fake_B.astype(np.float32) - real_B.astype(np.float32))
+    #     diff_map = (diff_map - diff_map.min()) / (diff_map.max() - diff_map.min() + 1e-8) * 255
+    #     diff_map = diff_map.astype(np.uint8)
+
+    #     # Handle missing saliency map
+    #     if self.saliency is None:
+    #         saliency_map = np.zeros_like(real_B)  # Black placeholder
+    #     else:
+    #         saliency_map = (self.saliency * 255).astype(np.uint8)  # Convert to image format
+
+    #     visuals = OrderedDict([
+    #         ('T1', real_T1),
+    #         ('T2', real_T2),
+    #         ('real_T1ce', real_B),
+    #         ('Pred_T1ce', fake_B),
+    #         ('Diff_Map', diff_map),
+    #         ('Saliency_Map', saliency_map)
+    #     ])
+
+    #     return visuals
 
     def get_current_visuals(self):
         real_A = util.tensor2im(self.real_A.data)
-        # real_T1 = np.stack([real_A[:, :, 0], real_A[:, :, 1], real_A[:, :, 0]], axis=-1)  # Shape (256, 256, 3)
-        # real_T2 = np.stack([real_A[:, :, 1], real_A[:, :, 0], real_A[:, :, 0]], axis=-1)  # Shape (256, 256, 3)
-        # Extract T1 and T2 from real_A
-        T1 = real_A[:, :, 0]  # First channel
-        T2 = real_A[:, :, 1]  # Second channel
-        # Flair = real_A[:, :, 3] 
 
-        # Map to RGB representations
-        real_T1 = np.stack([T1, T1, T1], axis=-1)  # Grayscale as RGB
-        real_T2 = np.stack([T2, T2, T2], axis=-1)  # Grayscale as RGB
-        # real_Flair = np.stack([Flair, Flair, Flair], axis=-1)  # Grayscale as RGB
-        
-        # T1_flipped = np.flip(real_T1, axis=1)  # Flip along width (horizontal flip)
-        # T2_flipped = np.flip(real_T2, axis=1)  # Flip along width
-        # Flair_flipped = np.flip(real_Flair, axis=1)  # Flip along width
+        # Extract T1 and T2
+        T1 = real_A[:, :, 0]
+        T2 = real_A[:, :, 1]
+
+        real_T1 = np.stack([T1, T1, T1], axis=-1)
+        real_T2 = np.stack([T2, T2, T2], axis=-1)
 
         fake_B = util.tensor2im(self.fake_B.data)
         real_B = util.tensor2im(self.real_B.data)
-        return OrderedDict([('T1', real_T1),('T2', real_T2), ('Pred_T1ce', fake_B), ('real_T1ce', real_B)])
+
+        diff_map = np.abs(fake_B.astype(np.float32) - real_B.astype(np.float32))
+        diff_map = (diff_map - diff_map.min()) / (diff_map.max() - diff_map.min() + 1e-8) * 255
+        diff_map = diff_map.astype(np.uint8)
+
+        # Handle saliency overlay visualization
+        if self.saliency is None:
+            saliency_map_vis = np.zeros_like(fake_B)  # Black placeholder
+        else:
+            saliency_np = self.saliency
+            if saliency_np.ndim == 3:
+                saliency_np = saliency_np[0]  # Take the first image from batch
+            elif saliency_np.ndim == 4:
+                saliency_np = saliency_np[0, 0]  # Handle [B, 1, H, W] case
+
+            saliency_map_vis = overlay_saliency_on_pred(fake_B, saliency_np)
+
+
+        visuals = OrderedDict([
+            ('T1', real_T1),
+            ('T2', real_T2),
+            ('real_T1ce', real_B),
+            ('Pred_T1ce', fake_B),
+            ('Diff_Map', diff_map),
+            ('Saliency_Map', saliency_map_vis)
+        ])
+
+        return visuals
+
+
+
+#         return OrderedDict([
+#             ('T1', real_T1),
+#             ('T2', real_T2),
+#             ('real_T1ce', real_B),
+#             ('Pred_T1ce', fake_B),
+#             ('Diff_Map', diff_map),
+#             ('Saliency_Map', saliency_map)  # Add saliency map here
+#         ])
+
 
 
     def save(self, label):
