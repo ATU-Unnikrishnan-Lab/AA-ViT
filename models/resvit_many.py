@@ -115,7 +115,7 @@ class ResViT_model(BaseModel):
         self.image_paths = input['A_paths' if AtoB else 'B_paths']
 
 
-    def forward(self, compute_saliency=True):
+    def forward(self, compute_saliency=False):
         # Forward pass through the generator
         self.real_A = Variable(self.input_A)
         self.fake_B = self.netG(self.real_A[:, 0:2, :, :])  # Generate fake B from real A
@@ -283,15 +283,70 @@ class ResViT_model(BaseModel):
         self.loss_D.backward()
 
         
-    def backward_G(self):
-        # First, G(A) should fake the discriminator
-        fake_AB = torch.cat((self.real_A[:,0:2,:,:], self.fake_B), 1)
-        pred_fake = self.netD(fake_AB)
-        self.loss_G_GAN = self.criterionGAN(pred_fake, True)*self.opt.lambda_adv
-        # Second, G(A) = B
-        self.loss_G_L1 = self.criterionL1(self.fake_B, self.real_B) * self.opt.lambda_A
-        self.loss_G = self.loss_G_GAN + self.loss_G_L1*1
+    # def backward_G(self):
+    #     # First, G(A) should fake the discriminator
+    #     fake_AB = torch.cat((self.real_A[:,0:2,:,:], self.fake_B), 1)
+    #     pred_fake = self.netD(fake_AB)
+    #     self.loss_G_GAN = self.criterionGAN(pred_fake, True)*self.opt.lambda_adv
+    #     # Second, G(A) = B
+    #     self.loss_G_L1 = self.criterionL1(self.fake_B, self.real_B) * self.opt.lambda_A
+    #     self.loss_G = self.loss_G_GAN + self.loss_G_L1*1
         
+    #     self.loss_G.backward()
+    # my changes here
+    # def backward_G(self):
+    #     # --- Adversarial loss ---
+    #     fake_AB = torch.cat((self.real_A, self.fake_B), 1)
+    #     pred_fake = self.netD(fake_AB)
+    #     self.loss_G_GAN = self.criterionGAN(pred_fake, True)
+
+    #     # --- Pixel-wise L1 loss ---
+    #     self.loss_G_L1 = self.criterionL1(self.fake_B, self.real_B)
+
+    #     # --- Self-supervised loss: difference map ---
+    #     if self.opt.lambda_diffmap > 0:
+    #         with torch.no_grad():  # no gradient through the real_B
+    #             diff_map = torch.abs(self.real_B - self.fake_B)
+
+    #         # Optional: normalize it to [0,1]
+    #         diff_map = diff_map / (diff_map.max() + 1e-8)
+
+    #         # Add a small loss that encourages the generator to reduce this difference
+    #         # This is effectively an auxiliary MSE loss, scaled
+    #         self.loss_diffmap = torch.mean(diff_map)  # or use MSE if you want stronger supervision
+    #         self.loss_G_diffmap = self.opt.lambda_diffmap * self.loss_diffmap
+    #     else:
+    #         self.loss_G_diffmap = 0
+
+    #     # --- Total Generator loss ---
+    #     self.loss_G = self.loss_G_GAN + self.loss_G_L1 + self.loss_G_diffmap
+    #     self.loss_G.backward()
+
+    def backward_G(self):
+        # --- Adversarial loss ---
+        fake_AB = torch.cat((self.real_A, self.fake_B), 1)
+        pred_fake = self.netD(fake_AB)
+        self.loss_G_GAN = self.criterionGAN(pred_fake, True)
+
+        # --- Pixel-wise L1 loss ---
+        self.loss_G_L1 = self.criterionL1(self.fake_B, self.real_B)
+
+        # --- Self-supervised loss: difference map ---
+        if self.opt.lambda_diffmap > 0:
+            # Allow gradient flow through fake_B
+            diff_map = torch.abs(self.real_B - self.fake_B)
+
+            # Normalize the difference map (optional)
+            # diff_map = diff_map / (diff_map.max() + 1e-8)
+
+            # Compute the auxiliary loss
+            self.loss_diffmap = torch.mean(diff_map)
+            self.loss_G_diffmap = self.opt.lambda_diffmap * self.loss_diffmap
+        else:
+            self.loss_G_diffmap = 0
+
+        # --- Total Generator loss ---
+        self.loss_G = self.loss_G_GAN + self.loss_G_L1*1 + self.loss_G_diffmap
         self.loss_G.backward()
 
     def optimize_parameters(self):
@@ -308,9 +363,9 @@ class ResViT_model(BaseModel):
     def get_current_errors(self):
         return OrderedDict([('G_GAN', self.loss_G_GAN.item()),
                             ('G_L1', self.loss_G_L1.item()),
+                            ('G_diff_map', self.loss_G_diffmap.item()),
                             ('D_real', self.loss_D_real.item()),
                             ('D_fake', self.loss_D_fake.item())
-
                             ])
 
 
@@ -385,9 +440,18 @@ class ResViT_model(BaseModel):
         fake_B = util.tensor2im(self.fake_B.data)
         real_B = util.tensor2im(self.real_B.data)
 
-        diff_map = np.abs(fake_B.astype(np.float32) - real_B.astype(np.float32))
-        diff_map = (diff_map - diff_map.min()) / (diff_map.max() - diff_map.min() + 1e-8) * 255
-        diff_map = diff_map.astype(np.uint8)
+        # diff_map = np.abs(fake_B.astype(np.float32) - real_B.astype(np.float32))
+        # diff_map = (diff_map - diff_map.min()) / (diff_map.max() - diff_map.min() + 1e-8) * 255
+        # diff_map = diff_map.astype(np.uint8)
+        
+        # Select the first image in the batch for the diff_map
+        diff_map = torch.abs(self.real_B[0] - self.fake_B[0]).detach().cpu().numpy().squeeze()  # Selecting first image
+        diff_map = diff_map / (diff_map.max() + 1e-8)  # Normalize between 0 and 1
+        diff_map = (diff_map * 255).astype(np.uint8)  # Scale to 0-255 range for visualization
+            # Convert diff_map to RGB by stacking it as 3 channels
+        diff_map = np.stack([diff_map] * 3, axis=-1)
+
+        # visuals['diff_map'] = diff_map
 
         # Handle saliency overlay visualization
         if self.saliency is None:

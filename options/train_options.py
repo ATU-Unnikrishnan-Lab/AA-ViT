@@ -36,3 +36,4 @@ class TrainOptions(BaseOptions):
         self.parser.add_argument('--lambda_vgg', type=float, default=1.0, help='weight for vgg loss')
         self.parser.add_argument('--vgg_layer', type=float, default=2, help='layer of vgg for perc loss')
         self.parser.add_argument('--lambda_adv', type=float, default=1.0, help='weight for adversarial loss')
+        self.parser.add_argument('--lambda_diffmap', type=float, default=10, help='weight for difference map')

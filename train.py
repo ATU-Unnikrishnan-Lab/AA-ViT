@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 import os
 import numpy as np
 
+
 # def visualize_results(fake_B, real_B, diff_map, saliency, epoch, save_dir):
 #     os.makedirs(save_dir, exist_ok=True)  # Ensure save directory exists
 
@@ -66,6 +67,7 @@ def print_log(logger,message):
         logger.write(str(message) + '\n')
 if __name__ == '__main__':
     opt = TrainOptions().parse()
+    
     #Training data
     data_loader = CreateDataLoader(opt)
     dataset = data_loader.load_data()

@@ -39,7 +39,7 @@
 
                     
                       // fine-tunning or training part
-                      // "--name", "T1_T2_T1ce_batch_1_temp",
+                      // "--name", "T1_T2_T1ce_batch_32_self_supervision_1st_w/o_norm",
                       // "--batchSize","32",
                       // "--gpu_ids", "0",
                       // "--model", "resvit_many",
@@ -64,15 +64,15 @@
                       // "--lr", "0.0001",
                       // "--resize_or_crop","scale_width",
 
-                    //   "--epoch_count", "48",
-                    //   "--which_epoch","latest",
+                    //   "--epoch_count", "10",
+                    // //   "--which_epoch","latest",
                     //   "--continue_train",
 
 
 
                       // testing of new trained 
                       // "--dataroot", "C:/Users/TalhaMeraj-RESEARCH/OneDrive - Atlantic TU/Desktop/Talha/BRATS/2D_RGB/T1_T2_T1ce",
-                      "--name", "T1_T2_T1ce_batch_1_temp",
+                      "--name", "T1_T2_T1ce_batch_32_self_supervision_1st_w/o_norm",
                       "--gpu_ids", "0",
                       "--model", "resvit_many",
                       "--which_model_netG", "resvit",
@@ -87,8 +87,8 @@
                       "--loadSize", "256",
                       "--results_dir", "results/",
                       "--checkpoints_dir", "checkpoints/",
-                      // "--pre_trained_transformer", "0",
-                      // "--pre_trained_path", "checkpoints/T1_T2_T1ce_subset_pre_trained/latest_net_G.pth", 
+                      // // "--pre_trained_transformer", "0",
+                      // // "--pre_trained_path", "checkpoints/T1_T2_T1ce_subset_pre_trained/latest_net_G.pth", 
                       "--which_epoch", "latest"
             ]
         }
