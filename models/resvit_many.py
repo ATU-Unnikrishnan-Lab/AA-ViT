@@ -16,6 +16,7 @@ import numpy as np
 from io import BytesIO
 from collections import OrderedDict
 from PIL import Image
+import torch.nn.functional as F
 
 def overlay_saliency_on_pred(pred, saliency):
     """
@@ -61,7 +62,9 @@ class ResViT_model(BaseModel):
         self.ssim_values = []  # Store SSIM for all images
 
         # load/define networks
-        self.netG = networks.define_G(2, opt.output_nc, opt.ngf,
+
+        # my changes here
+        self.netG = networks.define_G(3, opt.output_nc, opt.ngf,
                                       opt.which_model_netG,opt.vit_name,opt.fineSize,opt.pre_trained_path, opt.norm, not opt.no_dropout, opt.init_type, self.gpu_ids,
                                       pre_trained_trans=opt.pre_trained_transformer,pre_trained_resnet = opt.pre_trained_resnet)
         # Initialize attributes
@@ -118,7 +121,9 @@ class ResViT_model(BaseModel):
     def forward(self, compute_saliency=False):
         # Forward pass through the generator
         self.real_A = Variable(self.input_A)
-        self.fake_B = self.netG(self.real_A[:, 0:2, :, :])  # Generate fake B from real A
+        # my changes here
+        self.fake_B = self.netG(self.real_A[:, 0:3, :, :])  # Generate fake B from real A
+        
         self.real_B = Variable(self.input_B)  # Ground truth B (real B)
 
         # If we need to compute saliency, do it here
@@ -127,7 +132,7 @@ class ResViT_model(BaseModel):
             self.real_A.requires_grad = True  # Ensure gradients can be computed
             
             # Recompute the fake B with gradient tracking enabled
-            self.fake_B = self.netG(self.real_A[:, 0:2, :, :])
+            self.fake_B = self.netG(self.real_A[:, 0:3, :, :])
 
             # Compute MSE loss for saliency
             loss = torch.nn.functional.mse_loss(self.fake_B, self.real_B)
@@ -184,7 +189,7 @@ class ResViT_model(BaseModel):
             # Enable gradient tracking
             self.real_A = self.input_A.clone().detach().requires_grad_(True)
             self.real_B = self.input_B
-            self.fake_B = self.netG(self.real_A[:, 0:2, :, :])
+            self.fake_B = self.netG(self.real_A[:, 0:3, :, :])
 
             loss = torch.nn.functional.mse_loss(self.fake_B, self.real_B)
             gradients = torch.autograd.grad(outputs=loss, inputs=self.real_A, create_graph=False, retain_graph=True)[0]
@@ -196,7 +201,7 @@ class ResViT_model(BaseModel):
         else:
             with torch.no_grad():
                 self.real_A = self.input_A
-                self.fake_B = self.netG(self.real_A[:, 0:2, :, :])
+                self.fake_B = self.netG(self.real_A[:, 0:3, :, :])
                 self.real_B = self.input_B
 
         # Detach tensors and convert to numpy for visualization
@@ -270,11 +275,11 @@ class ResViT_model(BaseModel):
     def backward_D(self):
         # Fake
         # stop backprop to the generator by detaching fake_B
-        fake_AB = self.fake_AB_pool.query(torch.cat((self.real_A[:,0:2,:,:], self.fake_B), 1).data)
+        fake_AB = self.fake_AB_pool.query(torch.cat((self.real_A[:,0:3,:,:], self.fake_B), 1).data)
         pred_fake = self.netD(fake_AB.detach())
         self.loss_D_fake = self.criterionGAN(pred_fake, False) #
         # Real
-        real_AB = torch.cat((self.real_A[:,0:2,:,:], self.real_B), 1)
+        real_AB = torch.cat((self.real_A[:,0:3,:,:], self.real_B), 1)
         pred_real = self.netD(real_AB)
         self.loss_D_real = self.criterionGAN(pred_real, True)
         # Combined loss
@@ -345,8 +350,59 @@ class ResViT_model(BaseModel):
         else:
             self.loss_G_diffmap = 0
 
+        # diff_map = torch.abs(self.real_B - self.fake_B) # [32,1,256,256]
+        # diff_map = diff_map / (diff_map.max() + 1e-8)  # Safe normalization
+
+        # Create a binary mask for high-error regions
+        # threshold = 0.3  # Choose empirically
+        # mask = (diff_map > threshold).float()  # [B, 1, H, W]
+
+        # mask = diff_map.squeeze(1)  # shape: [B, H, W]
+        # mask = mask ** 2  # Optional: emphasize larger errors more        # import matplotlib.pyplot as plt
+
+        # # Let's say you're in a loop: visualize the first image in the batch
+        # mask_vis = mask[0, 0].detach().cpu().numpy()  # Shape: [256, 256]
+
+        # plt.imshow(mask_vis, cmap='hot')
+        # plt.title("Contrastive Loss Mask (High Diff Regions)")
+        # plt.colorbar()
+        # plt.show()
+
+
+        # 4. Apply mask and compute cosine contrastive loss
+        # self.loss_G_contrastive = (1 - F.cosine_similarity(self.real_B, self.fake_B, dim=1, eps=1e-6)) * mask
+        # 3. Cosine similarity loss (1 - similarity) — shape: [B, H, W]
+        # contrastive_map = 1 - F.cosine_similarity(self.real_B, self.fake_B, dim=1, eps=1e-6)
+
+
+        # contrast_map = (1 - F.cosine_similarity(feat_real, feat_fake, dim=1)).detach()
+
+        # # Visualize first image in batch
+        # plt.imshow(contrast_map[0].cpu().numpy(), cmap='viridis')
+        # plt.title("Per-Pixel Contrastive Loss")
+        # plt.colorbar()
+        # plt.show()
+
+
+        # 4. Weighted contrastive loss
+        # weighted_contrastive = contrastive_map * mask
+        # self.loss_G_contrastive = weighted_contrastive.mean() * 100.0
+
+        # mask = torch.sigmoid((diff_map - 0.3) * 15)  # Make transition around 0.5 sharper
+
+        # Optional: visualize this mask
+        # import matplotlib.pyplot as plt
+        # plt.imshow(mask[0, 0].detach().cpu().numpy(), cmap='hot'); plt.colorbar(); plt.show()
+
+        # 4. Use a masked L1 loss instead of cosine
+        # weighted_diff = diff_map * mask
+        # self.loss_G_focus = weighted_diff.mean() *100.0
+        # self.loss_G_L1 = self.loss_G_L1*10 
+        # self.loss_G_focus = (diff_map * mask).mean()
+        # self.loss_G_L1 = self.loss_G_L1 * 10
         # --- Total Generator loss ---
-        self.loss_G = self.loss_G_GAN + self.loss_G_L1*1 + self.loss_G_diffmap
+        # self.loss_G_focus =self.loss_G_focus*50
+        self.loss_G = self.loss_G_GAN + self.loss_G_L1 + self.loss_G_diffmap #+ self.loss_G_focus
         self.loss_G.backward()
 
     def optimize_parameters(self):
@@ -364,6 +420,7 @@ class ResViT_model(BaseModel):
         return OrderedDict([('G_GAN', self.loss_G_GAN.item()),
                             ('G_L1', self.loss_G_L1.item()),
                             ('G_diff_map', self.loss_G_diffmap.item()),
+                            # ('G_Focus_L1', self.loss_G_focus.item()),
                             ('D_real', self.loss_D_real.item()),
                             ('D_fake', self.loss_D_fake.item())
                             ])
@@ -433,16 +490,18 @@ class ResViT_model(BaseModel):
         # Extract T1 and T2
         T1 = real_A[:, :, 0]
         T2 = real_A[:, :, 1]
+        Flair = real_A[:, :, 2]
 
         real_T1 = np.stack([T1, T1, T1], axis=-1)
         real_T2 = np.stack([T2, T2, T2], axis=-1)
+        real_Flair = np.stack([Flair,Flair,Flair], axis=-1)
 
         fake_B = util.tensor2im(self.fake_B.data)
         real_B = util.tensor2im(self.real_B.data)
 
-        # diff_map = np.abs(fake_B.astype(np.float32) - real_B.astype(np.float32))
-        # diff_map = (diff_map - diff_map.min()) / (diff_map.max() - diff_map.min() + 1e-8) * 255
-        # diff_map = diff_map.astype(np.uint8)
+        diff_map = np.abs(fake_B.astype(np.float32) - real_B.astype(np.float32))
+        diff_map = (diff_map - diff_map.min()) / (diff_map.max() - diff_map.min() + 1e-8) * 255
+        diff_map = diff_map.astype(np.uint8)
         
         # Select the first image in the batch for the diff_map
         diff_map = torch.abs(self.real_B[0] - self.fake_B[0]).detach().cpu().numpy().squeeze()  # Selecting first image
@@ -469,6 +528,7 @@ class ResViT_model(BaseModel):
         visuals = OrderedDict([
             ('T1', real_T1),
             ('T2', real_T2),
+            ('FLAIR',real_Flair),
             ('real_T1ce', real_B),
             ('Pred_T1ce', fake_B),
             ('Diff_Map', diff_map),

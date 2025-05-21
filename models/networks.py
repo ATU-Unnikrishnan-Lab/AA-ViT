@@ -620,7 +620,8 @@ class NLayerDiscriminator(nn.Module):
 
     def forward(self, input):
         if len(self.gpu_ids) and isinstance(input.data, torch.cuda.FloatTensor):
-            return nn.parallel.data_parallel(self.model, input[:, :2, :, :], self.gpu_ids)
+            # my changes here
+            return nn.parallel.data_parallel(self.model, input[:, :3, :, :], self.gpu_ids)
         else:
             print(self.model(input).size())
             return self.model(input)
