@@ -45,93 +45,51 @@ Sequentially select subjects from the dataset.
 Apply skull-stripping to 3D volumes.
 Select 2D cross-sections from each subject.
 Normalize the selected 2D cross-sections before training and before metric calculation.
+
+Unlike the original ResViT data pipeline (2 modalities packed into the R/G channels of an RGB image), this codebase's loader ([data/aligned_dataset.py](data/aligned_dataset.py)) reads a single **4-channel `.tiff`** file per slice, with channels in the fixed order **[T1, T2, FLAIR, T1ce]**. For `--which_direction AtoB`, the input `A` is `[T1, T2, FLAIR]` (3-channel, `--input_nc 3`) and the target `B` is `T1ce` (1-channel, `--output_nc 1`); `--which_direction BtoA` reverses this.
+
 You should structure your aligned dataset in the following way:
 ```
-/Datasets/BRATS/
-  ├── T1_T2
-  ├── T2_FLAIR
-  .
-  .
-  ├── T1_FLAIR_T2   
-```
-```
-/Datasets/BRATS/T2__FLAIR/
+/Datasets/BraTS2021/T1_T2_FLAIR_T1ce/
   ├── train
-  ├── val  
-  ├── test   
+  ├── val
+  ├── test
 ```
-Note that for many-to-one tasks, source modalities should be in the Red and Green channels. (For 2 input modalities)
+Each file under `train`/`val`/`test` is a single co-registered, 4-channel `.tiff` slice (one channel per modality, in the order above).
 
 ## Pre-training of ART blocks without the presence of transformers
-It is recommended to pretrain the convolutional parts of the ResViT model before inserting transformer modules and fine-tuning. This signifcantly improves ResViT's.
-
-For many-to-one tasks: 
-
-<br />
+It is recommended to pretrain the convolutional parts of the model before inserting transformer modules and fine-tuning. This significantly improves training stability.
 
 ```
-python3 train.py --dataroot Datasets/IXI/T1_T2__PD/ --name T1_T2_PD_IXI_pre_trained --gpu_ids 0 --model resvit_many --which_model_netG res_cnn 
+python3 train.py --dataroot Datasets/BraTS2021/T1_T2_FLAIR_T1ce/ --name T1_T2_Flair_T1ce_nc_3_pretrained_batch_32_AAViT --gpu_ids 0 --model resvit_many --which_model_netG res_cnn 
 --which_direction AtoB --lambda_A 100 --dataset_mode aligned --norm batch --pool_size 0 --output_nc 1 --input_nc 3 --loadSize 256 --fineSize 256 
 --niter 50 --niter_decay 50 --save_epoch_freq 5 --checkpoints_dir checkpoints/ --display_id 0 --lr 0.0002
 ```
 
 <br />
 <br />
-For one-to-one tasks: <br />
 
+## Fine tune AA-ViT
 ```
-python3 train.py --dataroot Datasets/IXI/T1_T2/ --name T1_T2_IXI_pre_trained --gpu_ids 0 --model resvit_one --which_model_netG res_cnn 
---which_direction AtoB --lambda_A 100 --dataset_mode aligned --norm batch --pool_size 0 --output_nc 1 --input_nc 1 --loadSize 256 --fineSize 256 
---niter 50 --niter_decay 50 --save_epoch_freq 5 --checkpoints_dir checkpoints/ --display_id 0 --lr 0.0002
-```
-
-<br />
-<br />
-
-## Fine tune ResViT
-For many-to-one tasks: <br />
-
-```
-python3 train.py --dataroot Datasets/IXI/T1_T2__PD/ --name T1_T2_PD_IXI_resvit --gpu_ids 0 --model resvit_many --which_model_netG resvit 
+python3 train.py --dataroot Datasets/BraTS2021/T1_T2_FLAIR_T1ce/ --name T1_T2_Flair_T1ce_nc_3_L1Tune_EMA_diffmap_RDEB_Edge_batch_4_AAViT --gpu_ids 0 --model resvit_many --which_model_netG resvit 
 --which_direction AtoB --lambda_A 100 --dataset_mode aligned --norm batch --pool_size 0 --output_nc 1 --input_nc 3 --loadSize 256 --fineSize 256 
---niter 25 --niter_decay 25 --save_epoch_freq 5 --checkpoints_dir checkpoints/ --display_id 0 --pre_trained_transformer 1 --pre_trained_resnet 1 
---pre_trained_path checkpoints/T1_T2_PD_IXI_pre_trained/latest_net_G.pth --lr 0.001
+--niter 50 --niter_decay 50 --save_epoch_freq 50 --checkpoints_dir checkpoints/ --display_id 0 --batchSize 4 
+--pre_trained_transformer 1 --pre_trained_resnet 1 --pre_trained_path checkpoints/T1_T2_Flair_T1ce_nc_3_pretrained_batch_32_AAViT/latest_net_G.pth --lr 0.0001 
+--lambda_diffmap 10.0 --lambda_edge 10.0 --lambda_fft 0.05 --lambda_ms 10.0
 ```
-
-<br />
-<br />
-For one-to-one tasks: <br />
-
-```
-python3 train.py --dataroot Datasets/IXI/T1_T2/ --name T1_T2_IXI_resvit --gpu_ids 0 --model resvit_one --which_model_netG resvit 
---which_direction AtoB --lambda_A 100 --dataset_mode aligned --norm batch --pool_size 0 --output_nc 1 --input_nc 1 --loadSize 256 --fineSize 256 
---niter 25 --niter_decay 25 --save_epoch_freq 5 --checkpoints_dir checkpoints/ --display_id 0 --pre_trained_transformer 1 --pre_trained_resnet 1 
---pre_trained_path checkpoints/T1_T2_IXI_pre_trained/latest_net_G.pth --lr 0.001
-```
+`--lambda_diffmap`, `--lambda_edge`, `--lambda_fft` and `--lambda_ms` weight AA-ViT's anatomically aware loss terms (difference-map, edge, frequency and multi-scale consistency); the Residual Dense Edge Block (RDEB) itself is always part of the generator, not a flag. An exponential moving average (EMA) copy of the generator is kept by default during training — disable it with `--no_ema`, or tune `--ema_decay_g` (default `0.999`).
 
 <br />
 <br />
 
 ## Testing
-For many-to-one tasks: 
-<br />
-
 ```
-python3 test.py --dataroot Datasets/IXI/T1_T2__PD/ --name T1_T2_PD_IXI_resvit --gpu_ids 0 --model resvit_many --which_model_netG resvit 
+python3 test.py --dataroot Datasets/BraTS2021/T1_T2_FLAIR_T1ce/ --name T1_T2_Flair_T1ce_nc_3_L1Tune_EMA_diffmap_RDEB_Edge_batch_4_AAViT --gpu_ids 0 --model resvit_many --which_model_netG resvit 
 --dataset_mode aligned --norm batch --phase test --output_nc 1 --input_nc 3 --how_many 10000 --serial_batches --fineSize 256 --loadSize 256 
 --results_dir results/ --checkpoints_dir checkpoints/ --which_epoch latest
 ```
+Testing loads the EMA generator checkpoint by default; pass `--no_ema` to evaluate the raw (non-EMA) weights instead.
 
-<br />
-<br />
-For one-to-one tasks: 
-<br />
-
-```
-python3 test.py --dataroot Datasets/IXI/T1_T2/ --name T1_T2_IXI_resvit --gpu_ids 0 --model resvit_one --which_model_netG resvit 
---dataset_mode aligned --norm batch --phase test --output_nc 1 --input_nc 1 --how_many 10000 --serial_batches --fineSize 256 --loadSize 256 
---results_dir results/ --checkpoints_dir checkpoints/ --which_epoch latest
-```
 # Citation
 You are encouraged to modify/distribute this code. However, please acknowledge this code and cite the AA-ViT paper appropriately.
 ```
