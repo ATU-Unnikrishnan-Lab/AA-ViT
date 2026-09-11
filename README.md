@@ -26,8 +26,8 @@ cuda=>11.2
 ## Installation
 - Clone this repo:
 ```bash
-git clone https://github.com/TalhaMeraj/resvit
-cd resvit
+git clone https://github.com/TalhaMeraj/AA-ViT
+cd AA-ViT
 ```
 
 ## Download pre-trained ViT models from Google
