@@ -90,7 +90,9 @@ def get_scheduler(optimizer, opt):
     if opt.lr_policy == 'lambda':
         def lambda_rule(epoch):
             lr_l = 1.0 - max(0, epoch + 1 + opt.epoch_count - opt.niter) / float(opt.niter_decay + 1)
-            return lr_l
+            # my changes here
+            # return lr_l
+            return max(0, lr_l)
         scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda_rule)
     elif opt.lr_policy == 'step':
         scheduler = lr_scheduler.StepLR(optimizer, step_size=opt.lr_decay_iters, gamma=0.1)
@@ -101,73 +103,240 @@ def get_scheduler(optimizer, opt):
     return scheduler
 
 
-def define_G(input_nc, output_nc, ngf, which_model_netG,vit_name,img_size,pre_trained_path, norm='batch', use_dropout=False, init_type='normal', gpu_ids=[],pre_trained_trans=True,pre_trained_resnet=0):
+
+def define_G(
+    input_nc,
+    output_nc,
+    ngf,
+    which_model_netG,
+    vit_name,
+    img_size,
+    pre_trained_path,
+    norm='batch',
+    use_dropout=False,
+    init_type='normal',
+    gpu_ids=[],
+    pre_trained_trans=True,
+    pre_trained_resnet=0
+):
+
     netG = None
-    use_gpu = len(gpu_ids) > 0
+
+    # ---------------------------------------------------------
+    # Select device
+    # ---------------------------------------------------------
+    if len(gpu_ids) > 0 and torch.cuda.is_available():
+
+        device = torch.device('cuda:%d' % gpu_ids[0])
+        print('Using CUDA:', device)
+
+    elif len(gpu_ids) > 0 and torch.backends.mps.is_available():
+
+        device = torch.device('mps')
+        print('Using Apple MPS GPU')
+
+    else:
+
+        device = torch.device('cpu')
+        print('Using CPU')
+
     norm_layer = get_norm_layer(norm_type=norm)
 
-    if use_gpu:
-        assert(torch.cuda.is_available())
+    # ---------------------------------------------------------
+    # Standard generators
+    # ---------------------------------------------------------
     if which_model_netG == 'resnet_9blocks':
-        netG = ResnetGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=9, gpu_ids=gpu_ids)
+
+        netG = ResnetGenerator(
+            input_nc,
+            output_nc,
+            ngf,
+            norm_layer=norm_layer,
+            use_dropout=use_dropout,
+            n_blocks=9,
+            gpu_ids=gpu_ids
+        )
+
     elif which_model_netG == 'resnet_6blocks':
-        netG = ResnetGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=6, gpu_ids=gpu_ids)
+
+        netG = ResnetGenerator(
+            input_nc,
+            output_nc,
+            ngf,
+            norm_layer=norm_layer,
+            use_dropout=use_dropout,
+            n_blocks=6,
+            gpu_ids=gpu_ids
+        )
+
     elif which_model_netG == 'unet_128':
-        netG = UnetGenerator(input_nc, output_nc, 7, ngf, norm_layer=norm_layer, use_dropout=use_dropout, gpu_ids=gpu_ids)
+
+        netG = UnetGenerator(
+            input_nc,
+            output_nc,
+            7,
+            ngf,
+            norm_layer=norm_layer,
+            use_dropout=use_dropout,
+            gpu_ids=gpu_ids
+        )
+
     elif which_model_netG == 'unet_256':
-        netG = UnetGenerator(input_nc, output_nc, 8, ngf, norm_layer=norm_layer, use_dropout=use_dropout, gpu_ids=gpu_ids)
+
+        netG = UnetGenerator(
+            input_nc,
+            output_nc,
+            8,
+            ngf,
+            norm_layer=norm_layer,
+            use_dropout=use_dropout,
+            gpu_ids=gpu_ids
+        )
+
+    # ---------------------------------------------------------
+    # Res_CNN
+    # Used for pretraining
+    # ---------------------------------------------------------
     elif which_model_netG == 'res_cnn':
-        netG = residual_transformers.Res_CNN(residual_transformers.CONFIGS[vit_name], input_dim= input_nc, img_size=img_size, output_dim=1, vis=False)
+
+        netG = residual_transformers.Res_CNN(
+            residual_transformers.CONFIGS[vit_name],
+            input_dim=input_nc,
+            img_size=img_size,
+            output_dim=1,
+            vis=False
+        )
+
+    # ---------------------------------------------------------
+    # ResViT
+    # Full ResViT model
+    # ---------------------------------------------------------
     elif which_model_netG == 'resvit':
+
         print(vit_name)
-        netG = residual_transformers.ResViT(residual_transformers.CONFIGS[vit_name],input_dim = input_nc,img_size=img_size, output_dim=1, vis=False)
+
         config_vit = residual_transformers.CONFIGS[vit_name]
+
+        netG = residual_transformers.ResViT(
+            config_vit,
+            input_dim=input_nc,
+            img_size=img_size,
+            output_dim=1,
+            vis=False
+        )
+
+        # -----------------------------------------------------
+        # Load pretrained Res_CNN weights
+        # -----------------------------------------------------
         if pre_trained_resnet:
-            pre_trained_model = residual_transformers.Res_CNN(residual_transformers.CONFIGS[vit_name], input_dim= input_nc, img_size=img_size, output_dim=1, vis=False)
-            save_path = pre_trained_path
-            print("pre_trained_path: ",save_path)
-            pre_trained_model.load_state_dict(torch.load(save_path))
+
+            print("Loading pretrained Res_CNN:")
+            print(pre_trained_path)
+
+            pre_trained_model = residual_transformers.Res_CNN(
+                config_vit,
+                input_dim=input_nc,
+                img_size=img_size,
+                output_dim=1,
+                vis=False
+            )
+
+            # Load checkpoint onto CPU first.
+            # This makes loading portable between CUDA, MPS and CPU.
+            checkpoint = torch.load(
+                pre_trained_path,
+                map_location='cpu'
+            )
+
+            pre_trained_model.load_state_dict(checkpoint)
 
             pretrained_dict = pre_trained_model.state_dict()
             model_dict = netG.state_dict()
 
-            # 1. filter out unnecessary keys
-            pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
-            # 2. overwrite entries in the existing state dict
-            model_dict.update(pretrained_dict)
-            # 3. load the new state dict
+            # Only load parameters that exist in ResViT
+            # and have exactly the same shape.
+            filtered_dict = {
+                k: v
+                for k, v in pretrained_dict.items()
+                if k in model_dict
+                and v.size() == model_dict[k].size()
+            }
+
+            model_dict.update(filtered_dict)
+
             netG.load_state_dict(model_dict)
 
-            print("Residual CNN loaded")
+            print(
+                "Residual CNN loaded:",
+                len(filtered_dict),
+                "compatible weights"
+            )
 
+            # Free temporary pretrained model
+            del pre_trained_model
+
+        # -----------------------------------------------------
+        # Load pretrained Transformer weights
+        # -----------------------------------------------------
         if pre_trained_trans:
 
+            print(
+                "Loading pretrained Transformer weights:"
+            )
 
-            # Print the current working directory
-            print("Current working directory:", os.getcwd())
-
-            # # Manually correct the path
-            # config_vit.pretrained_path = os.path.join(
-            #     os.getcwd(), "ResViT-main", "model", "vit_checkpoint", "imagenet21k", "R50-ViT-B_16.npz"
-            # )
             print(config_vit.pretrained_path)
-            
-            netG.load_from(weights=np.load(config_vit.pretrained_path))
+
+            netG.load_from(
+                weights=np.load(
+                    config_vit.pretrained_path,
+                    allow_pickle=True
+                )
+            )
+
     else:
-        raise NotImplementedError('Generator model name [%s] is not recognized' % which_model_netG)
-    if len(gpu_ids) > 0:
-        netG.cuda(gpu_ids[0])
+
+        raise NotImplementedError(
+            'Generator model name [%s] is not recognized'
+            % which_model_netG
+        )
+
+    # ---------------------------------------------------------
+    # Move COMPLETE generator to selected device
+    #
+    # This is important for Res_CNN and ResViT because their
+    # layers are created on CPU by default.
+    # ---------------------------------------------------------
+    netG = netG.to(device)
+
+    print(
+        "Generator:",
+        which_model_netG,
+        "| device:",
+        next(netG.parameters()).device
+    )
+
     return netG
+
 
 
 def define_D(input_nc, ndf, which_model_netD,vit_name,img_size,
              n_layers_D=3, norm='batch', use_sigmoid=False, init_type='normal', gpu_ids=[]):
     netD = None
     use_gpu = len(gpu_ids) > 0
+    use_mps = torch.backends.mps.is_available()
+
     norm_layer = get_norm_layer(norm_type=norm)
 
     if use_gpu:
-        assert(torch.cuda.is_available())
+        if torch.cuda.is_available():
+            device = torch.device('cuda:%d' % gpu_ids[0])
+        elif use_mps:
+            device = torch.device('mps')
+            print('Using Apple MPS GPU')
+        else:
+            device = torch.device('cpu')
+            print('Using CPU')
+            
     if which_model_netD == 'basic':
         netD = NLayerDiscriminator(input_nc, ndf, n_layers=3, norm_layer=norm_layer, use_sigmoid=use_sigmoid, gpu_ids=gpu_ids)
     elif which_model_netD == 'n_layers':
@@ -178,7 +347,15 @@ def define_D(input_nc, ndf, which_model_netD,vit_name,img_size,
         raise NotImplementedError('Discriminator model name [%s] is not recognized' %
                                   which_model_netD)
     if use_gpu:
-        netD.cuda(gpu_ids[0])
+        if torch.cuda.is_available():
+            netD.cuda(gpu_ids[0])
+        elif torch.backends.mps.is_available():
+            netD = netD.to(torch.device('mps'))
+            print('Using Apple MPS GPU')
+        else:
+            netD = netD.to(torch.device('cpu'))
+            print('Using CPU')
+
     init_weights(netD, init_type=init_type)
     return netD
 
@@ -201,36 +378,88 @@ def print_network(net):
 # but it abstracts away the need to create the target label tensor
 # that has the same size as the input
 class GANLoss(nn.Module):
-    def __init__(self, use_lsgan=True, target_real_label=1.0, target_fake_label=0.0,
-                 tensor=torch.FloatTensor):
+    def __init__(
+        self,
+        use_lsgan=True,
+        target_real_label=1.0,
+        target_fake_label=0.0,
+        tensor=torch.FloatTensor
+    ):
         super(GANLoss, self).__init__()
+
         self.real_label = target_real_label
         self.fake_label = target_fake_label
+
         self.real_label_var = None
         self.fake_label_var = None
+
         self.Tensor = tensor
+
         if use_lsgan:
             self.loss = nn.MSELoss()
         else:
             self.loss = nn.BCELoss()
 
     def get_target_tensor(self, input, target_is_real):
-        target_tensor = None
+
         if target_is_real:
-            create_label = ((self.real_label_var is None) or
-                            (self.real_label_var.numel() != input.numel()))
+
+            create_label = (
+                self.real_label_var is None
+                or self.real_label_var.numel() != input.numel()
+                or self.real_label_var.device != input.device
+            )
+
             if create_label:
-                real_tensor = self.Tensor(input.size()).fill_(self.real_label)
-                self.real_label_var = Variable(real_tensor, requires_grad=False)
+                real_tensor = torch.full(
+                    input.size(),
+                    self.real_label,
+                    dtype=input.dtype,
+                    device=input.device
+                )
+
+                self.real_label_var = Variable(
+                    real_tensor,
+                    requires_grad=False
+                )
+
             target_tensor = self.real_label_var
+
         else:
-            create_label = ((self.fake_label_var is None) or
-                            (self.fake_label_var.numel() != input.numel()))
+
+            create_label = (
+                self.fake_label_var is None
+                or self.fake_label_var.numel() != input.numel()
+                or self.fake_label_var.device != input.device
+            )
+
             if create_label:
-                fake_tensor = self.Tensor(input.size()).fill_(self.fake_label)
-                self.fake_label_var = Variable(fake_tensor, requires_grad=False)
+                fake_tensor = torch.full(
+                    input.size(),
+                    self.fake_label,
+                    dtype=input.dtype,
+                    device=input.device
+                )
+
+                self.fake_label_var = Variable(
+                    fake_tensor,
+                    requires_grad=False
+                )
+
             target_tensor = self.fake_label_var
+
         return target_tensor
+
+    def __call__(self, input, target_is_real):
+
+        target_tensor = self.get_target_tensor(
+            input,
+            target_is_real
+        )
+
+        return self.loss(input, target_tensor)
+
+
 
     def __call__(self, input, target_is_real):
         target_tensor = self.get_target_tensor(input, target_is_real)
@@ -620,10 +849,8 @@ class NLayerDiscriminator(nn.Module):
 
     def forward(self, input):
         if len(self.gpu_ids) and isinstance(input.data, torch.cuda.FloatTensor):
-            # my changes here
-            return nn.parallel.data_parallel(self.model, input[:, :3, :, :], self.gpu_ids)
+            return nn.parallel.data_parallel(self.model, input, self.gpu_ids)
         else:
-            print(self.model(input).size())
             return self.model(input)
 
 

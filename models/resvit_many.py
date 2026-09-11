@@ -1,3 +1,4 @@
+import copy
 import torch
 from collections import OrderedDict
 from torch.autograd import Variable
@@ -17,6 +18,32 @@ from io import BytesIO
 from collections import OrderedDict
 from PIL import Image
 import torch.nn.functional as F
+from packaging import version
+import pytorch_ssim  # or use your own SSIM implementation
+from torchmetrics import StructuralSimilarityIndexMeasure
+
+
+def normalize_for_ssim(x):
+    # Convert [-1,1] -> [0,1] for SSIM
+    return (x + 1.0) / 2.0
+
+
+def edge_loss(pred, target):
+    # Sobel edge maps
+    sobel_x = torch.tensor([[1,0,-1],[2,0,-2],[1,0,-1]], dtype=torch.float32, device=pred.device).view(1,1,3,3)
+    sobel_y = torch.tensor([[1,2,1],[0,0,0],[-1,-2,-1]], dtype=torch.float32, device=pred.device).view(1,1,3,3)
+
+    weight_x = sobel_x.expand(pred.size(1),1,3,3)
+    weight_y = sobel_y.expand(pred.size(1),1,3,3)
+
+    edge_pred_x = F.conv2d(pred, weight_x, padding=1, groups=pred.size(1))
+    edge_pred_y = F.conv2d(pred, weight_y, padding=1, groups=pred.size(1))
+    edge_target_x = F.conv2d(target, weight_x, padding=1, groups=target.size(1))
+    edge_target_y = F.conv2d(target, weight_y, padding=1, groups=target.size(1))
+
+    return F.l1_loss(edge_pred_x, edge_target_x) + F.l1_loss(edge_pred_y, edge_target_y)
+
+
 
 def overlay_saliency_on_pred(pred, saliency):
     """
@@ -50,7 +77,6 @@ def overlay_saliency_on_pred(pred, saliency):
     return saliency_overlay
 
 
-
 class ResViT_model(BaseModel):
     def name(self):
         return 'ResViT_model'
@@ -60,26 +86,57 @@ class ResViT_model(BaseModel):
         self.isTrain = opt.isTrain
         self.psnr_values = []  # Store PSNR for all images
         self.ssim_values = []  # Store SSIM for all images
+        
+        # Initialize in your model's __init__ or setup
+        self.ema_diffmap = None
+        self.ema_edge = None
+        self.ema_decay = 0.99  # smoothing factor
 
         # load/define networks
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        # pretrained_path = "/home/fnu.talha/resvit/unet_b.ckpt"
+        # pretrained_encoder = load_encoder(pretrained_path, in_ch=3, device=device)
+        # self.encoder = load_encoder(pretrained_path, in_ch=1, device=device)
+        # self.seg_net = load_segmentation_unet(pretrained_path, in_ch=1, device=device)
 
+        # Initialize SSIM metric once (e.g., in __init__ of your model)
+        self.ssim_metric = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
         # my changes here
         self.netG = networks.define_G(3, opt.output_nc, opt.ngf,
                                       opt.which_model_netG,opt.vit_name,opt.fineSize,opt.pre_trained_path, opt.norm, not opt.no_dropout, opt.init_type, self.gpu_ids,
                                       pre_trained_trans=opt.pre_trained_transformer,pre_trained_resnet = opt.pre_trained_resnet)
+
+        # EMA (Exponential Moving Average) copy of the generator weights.
+        # Smooths out generator weight updates over training, which typically
+        # gives sharper/more stable samples at test time than the raw weights.
+        self.ema_decay_g = getattr(opt, 'ema_decay_g', 0.999)
+        self.use_ema = not getattr(opt, 'no_ema', False) and self.ema_decay_g > 0
+        if self.use_ema:
+            self.netG_ema = copy.deepcopy(self.netG)
+            for param in self.netG_ema.parameters():
+                param.requires_grad = False
+            self.netG_ema.eval()
+
         # Initialize attributes
         self.saliency = None  # Ensure this attribute always exists
 
         if self.isTrain:
             self.lambda_f = opt.lambda_f
             use_sigmoid = opt.no_lsgan
-            self.netD = networks.define_D(opt.input_nc + opt.output_nc-1, opt.ndf,
+            self.netD = networks.define_D(opt.input_nc + opt.output_nc, opt.ndf,
                                           opt.which_model_netD,opt.vit_name,opt.fineSize,
                                           opt.n_layers_D, opt.norm, use_sigmoid, opt.init_type, self.gpu_ids)
         if not self.isTrain or opt.continue_train:
             self.load_network(self.netG, 'G', opt.which_epoch)
             if self.isTrain:
                 self.load_network(self.netD, 'D', opt.which_epoch)
+            if self.use_ema:
+                try:
+                    self.load_network(self.netG_ema, 'G_ema', opt.which_epoch)
+                except FileNotFoundError:
+                    # No EMA checkpoint available (e.g. resuming a run saved
+                    # before EMA was added) - fall back to the raw G weights.
+                    self.netG_ema.load_state_dict(self.netG.state_dict())
 
         if self.isTrain:
             self.fake_AB_pool = ImagePool(opt.pool_size)
@@ -108,22 +165,36 @@ class ResViT_model(BaseModel):
 
     def set_input(self, input):
         AtoB = self.opt.which_direction == 'AtoB'
+
         input_A = input['A' if AtoB else 'B']
         input_B = input['B' if AtoB else 'A']
-        if len(self.gpu_ids) > 0:
+
+        if torch.cuda.is_available() and len(self.gpu_ids) > 0:
             input_A = input_A.cuda(self.gpu_ids[0], non_blocking=True)
             input_B = input_B.cuda(self.gpu_ids[0], non_blocking=True)
+
+        elif torch.backends.mps.is_available():
+            device = torch.device('mps')
+            input_A = input_A.to(device)
+            input_B = input_B.to(device)
+
+        else:
+            device = torch.device('cpu')
+            input_A = input_A.to(device)
+            input_B = input_B.to(device)
+
         self.input_A = input_A
         self.input_B = input_B
         self.image_paths = input['A_paths' if AtoB else 'B_paths']
 
 
-    def forward(self, compute_saliency=False):
+    def forward(self, compute_saliency=True):
         # Forward pass through the generator
         self.real_A = Variable(self.input_A)
         # my changes here
         self.fake_B = self.netG(self.real_A[:, 0:3, :, :])  # Generate fake B from real A
-        
+        # self.fake_B, self.edge_pred, self.diff_pred = self.netG(self.real_A[:, 0:3, :, :])
+
         self.real_B = Variable(self.input_B)  # Ground truth B (real B)
 
         # If we need to compute saliency, do it here
@@ -133,6 +204,7 @@ class ResViT_model(BaseModel):
             
             # Recompute the fake B with gradient tracking enabled
             self.fake_B = self.netG(self.real_A[:, 0:3, :, :])
+            # self.fake_B, self.edge_pred, self.diff_pred = self.netG(self.real_A[:, 0:3, :, :])
 
             # Compute MSE loss for saliency
             loss = torch.nn.functional.mse_loss(self.fake_B, self.real_B)
@@ -149,47 +221,20 @@ class ResViT_model(BaseModel):
                 self.saliency = np.zeros_like(saliency)
 
 
-    # def test(self):
-    #     with torch.no_grad():
-    #         self.real_A = Variable(self.input_A)
-    #         self.fake_B = self.netG(self.real_A[:, 0:2, :, :])
-    #         self.real_B = Variable(self.input_B)
-
-    #         # Convert tensors to numpy
-    #         fake_B_np = self.fake_B.cpu().numpy().squeeze()
-    #         real_B_np = self.real_B.cpu().numpy().squeeze()
-
-    #         # Convert [-1, 1] range to [0, 1]
-    #         fake_B_np = (fake_B_np + 1) / 2
-    #         real_B_np = (real_B_np + 1) / 2
-
-    #         # Clip to ensure values are strictly in [0, 1]
-    #         fake_B_np = np.clip(fake_B_np, 0, 1)
-    #         real_B_np = np.clip(real_B_np, 0, 1)
-
-    #         # Handle zero-max cases before PSNR computation
-    #         if real_B_np.max() <= 0 or fake_B_np.max() <= 0:
-    #             return  # Skip this image
-
-    #         # Compute PSNR and SSIM
-    #         psnr_value = psnr(real_B_np, fake_B_np, data_range=1.0)
-    #         ssim_value = ssim(real_B_np, fake_B_np, data_range=1.0, multichannel=True)
-
-    #         # Store values for averaging
-    #         self.psnr_values.append(psnr_value)
-    #         self.ssim_values.append(ssim_value)
-
-    #         print(f"Image {len(self.psnr_values)} | PSNR: {psnr_value}, SSIM: {ssim_value}")
-
-
-    def test(self, compute_saliency=True):
+    def test(self, compute_saliency=False):
         self.saliency = None  # Reset saliency before computation
+        torch.cuda.empty_cache()
+
+        # Use the EMA generator for inference when available - its smoothed
+        # weights typically give sharper/more stable outputs than the raw G.
+        netG = self.netG_ema if self.use_ema else self.netG
 
         if compute_saliency:
             # Enable gradient tracking
             self.real_A = self.input_A.clone().detach().requires_grad_(True)
             self.real_B = self.input_B
-            self.fake_B = self.netG(self.real_A[:, 0:3, :, :])
+            self.fake_B = netG(self.real_A[:, 0:3, :, :])
+            # self.fake_B, self.edge_pred, self.diff_pred = netG(self.real_A[:, 0:3, :, :])
 
             loss = torch.nn.functional.mse_loss(self.fake_B, self.real_B)
             gradients = torch.autograd.grad(outputs=loss, inputs=self.real_A, create_graph=False, retain_graph=True)[0]
@@ -201,7 +246,8 @@ class ResViT_model(BaseModel):
         else:
             with torch.no_grad():
                 self.real_A = self.input_A
-                self.fake_B = self.netG(self.real_A[:, 0:3, :, :])
+                self.fake_B = netG(self.real_A[:, 0:3, :, :])
+                # self.fake_B, self.edge_pred, self.diff_pred = netG(self.real_A[:, 0:3, :, :])
                 self.real_B = self.input_B
 
         # Detach tensors and convert to numpy for visualization
@@ -239,12 +285,8 @@ class ResViT_model(BaseModel):
         return fake_B_np, real_B_np, diff_map, self.saliency
 
 
-
-
-
     def compute_final_metrics(self):
         """Compute and print average and standard deviation for PSNR & SSIM after all images are processed."""
-        
         if self.psnr_values and self.ssim_values:
             # Convert lists to PyTorch tensors
             psnr_tensor = torch.tensor(self.psnr_values, dtype=torch.float32)
@@ -287,56 +329,18 @@ class ResViT_model(BaseModel):
 
         self.loss_D.backward()
 
-        
-    # def backward_G(self):
-    #     # First, G(A) should fake the discriminator
-    #     fake_AB = torch.cat((self.real_A[:,0:2,:,:], self.fake_B), 1)
-    #     pred_fake = self.netD(fake_AB)
-    #     self.loss_G_GAN = self.criterionGAN(pred_fake, True)*self.opt.lambda_adv
-    #     # Second, G(A) = B
-    #     self.loss_G_L1 = self.criterionL1(self.fake_B, self.real_B) * self.opt.lambda_A
-    #     self.loss_G = self.loss_G_GAN + self.loss_G_L1*1
-        
-    #     self.loss_G.backward()
-    # my changes here
-    # def backward_G(self):
-    #     # --- Adversarial loss ---
-    #     fake_AB = torch.cat((self.real_A, self.fake_B), 1)
-    #     pred_fake = self.netD(fake_AB)
-    #     self.loss_G_GAN = self.criterionGAN(pred_fake, True)
-
-    #     # --- Pixel-wise L1 loss ---
-    #     self.loss_G_L1 = self.criterionL1(self.fake_B, self.real_B)
-
-    #     # --- Self-supervised loss: difference map ---
-    #     if self.opt.lambda_diffmap > 0:
-    #         with torch.no_grad():  # no gradient through the real_B
-    #             diff_map = torch.abs(self.real_B - self.fake_B)
-
-    #         # Optional: normalize it to [0,1]
-    #         diff_map = diff_map / (diff_map.max() + 1e-8)
-
-    #         # Add a small loss that encourages the generator to reduce this difference
-    #         # This is effectively an auxiliary MSE loss, scaled
-    #         self.loss_diffmap = torch.mean(diff_map)  # or use MSE if you want stronger supervision
-    #         self.loss_G_diffmap = self.opt.lambda_diffmap * self.loss_diffmap
-    #     else:
-    #         self.loss_G_diffmap = 0
-
-    #     # --- Total Generator loss ---
-    #     self.loss_G = self.loss_G_GAN + self.loss_G_L1 + self.loss_G_diffmap
-    #     self.loss_G.backward()
 
     def backward_G(self):
         # --- Adversarial loss ---
-        fake_AB = torch.cat((self.real_A, self.fake_B), 1)
+        fake_AB = torch.cat((self.real_A[:, 0:3, :, :], self.fake_B), 1)
         pred_fake = self.netD(fake_AB)
         self.loss_G_GAN = self.criterionGAN(pred_fake, True)
 
         # --- Pixel-wise L1 loss ---
         self.loss_G_L1 = self.criterionL1(self.fake_B, self.real_B)
+        self.loss_G_L1 = self.loss_G_L1 #* 10
 
-        # --- Self-supervised loss: difference map ---
+
         if self.opt.lambda_diffmap > 0:
             # Allow gradient flow through fake_B
             diff_map = torch.abs(self.real_B - self.fake_B)
@@ -350,60 +354,66 @@ class ResViT_model(BaseModel):
         else:
             self.loss_G_diffmap = 0
 
-        # diff_map = torch.abs(self.real_B - self.fake_B) # [32,1,256,256]
-        # diff_map = diff_map / (diff_map.max() + 1e-8)  # Safe normalization
+        
 
-        # Create a binary mask for high-error regions
-        # threshold = 0.3  # Choose empirically
-        # mask = (diff_map > threshold).float()  # [B, 1, H, W]
+        # --- Edge loss ---
+        if getattr(self.opt, "lambda_edge", 0) > 0:
+            self.loss_G_edge = edge_loss(self.fake_B, self.real_B)
+            self.loss_G_edge = self.opt.lambda_edge * self.loss_G_edge
+        else:
+            self.loss_G_edge = torch.tensor(0.0, device=self.fake_B.device)
 
-        # mask = diff_map.squeeze(1)  # shape: [B, H, W]
-        # mask = mask ** 2  # Optional: emphasize larger errors more        # import matplotlib.pyplot as plt
+        # --- FFT high-pass loss ---
+        if getattr(self.opt, "lambda_fft", 0) > 0:
+            self.loss_G_fft = self.fft_highpass_loss(self.fake_B, self.real_B, radius_frac=0.06)
+            # Optional: multiply by soft diff_map to focus on high-error regions
+            self.loss_G_fft = self.opt.lambda_fft * self.loss_G_fft
+        else:
+            self.loss_G_fft = torch.tensor(0.0, device=self.fake_B.device)
 
-        # # Let's say you're in a loop: visualize the first image in the batch
-        # mask_vis = mask[0, 0].detach().cpu().numpy()  # Shape: [256, 256]
+        # --- Combine all losses ---
+        self.loss_G = (
+            self.loss_G_GAN
+            + self.loss_G_L1
+            + self.loss_G_diffmap
+            + self.loss_G_edge
+            + self.loss_G_fft
+        )
 
-        # plt.imshow(mask_vis, cmap='hot')
-        # plt.title("Contrastive Loss Mask (High Diff Regions)")
-        # plt.colorbar()
-        # plt.show()
-
-
-        # 4. Apply mask and compute cosine contrastive loss
-        # self.loss_G_contrastive = (1 - F.cosine_similarity(self.real_B, self.fake_B, dim=1, eps=1e-6)) * mask
-        # 3. Cosine similarity loss (1 - similarity) — shape: [B, H, W]
-        # contrastive_map = 1 - F.cosine_similarity(self.real_B, self.fake_B, dim=1, eps=1e-6)
-
-
-        # contrast_map = (1 - F.cosine_similarity(feat_real, feat_fake, dim=1)).detach()
-
-        # # Visualize first image in batch
-        # plt.imshow(contrast_map[0].cpu().numpy(), cmap='viridis')
-        # plt.title("Per-Pixel Contrastive Loss")
-        # plt.colorbar()
-        # plt.show()
-
-
-        # 4. Weighted contrastive loss
-        # weighted_contrastive = contrastive_map * mask
-        # self.loss_G_contrastive = weighted_contrastive.mean() * 100.0
-
-        # mask = torch.sigmoid((diff_map - 0.3) * 15)  # Make transition around 0.5 sharper
-
-        # Optional: visualize this mask
-        # import matplotlib.pyplot as plt
-        # plt.imshow(mask[0, 0].detach().cpu().numpy(), cmap='hot'); plt.colorbar(); plt.show()
-
-        # 4. Use a masked L1 loss instead of cosine
-        # weighted_diff = diff_map * mask
-        # self.loss_G_focus = weighted_diff.mean() *100.0
-        # self.loss_G_L1 = self.loss_G_L1*10 
-        # self.loss_G_focus = (diff_map * mask).mean()
-        # self.loss_G_L1 = self.loss_G_L1 * 10
-        # --- Total Generator loss ---
-        # self.loss_G_focus =self.loss_G_focus*50
-        self.loss_G = self.loss_G_GAN + self.loss_G_L1 + self.loss_G_diffmap #+ self.loss_G_focus
         self.loss_G.backward()
+
+
+    # --- FFT high-pass loss function ---
+    def fft_highpass_loss(self, pred, target, radius_frac=0.08):
+        B,C,H,W = pred.shape
+        Fp = torch.fft.fftshift(torch.fft.fft2(pred.squeeze(1)), dim=(-2,-1))
+        Ft = torch.fft.fftshift(torch.fft.fft2(target.squeeze(1)), dim=(-2,-1))
+        yy, xx = torch.meshgrid(torch.arange(H, device=pred.device), torch.arange(W, device=pred.device))
+        cy, cx = H//2, W//2
+        r = torch.sqrt((yy-cy).float()**2 + (xx-cx).float()**2)
+        r = r / r.max()
+        mask = (r > radius_frac).float()
+
+        mag_diff = torch.abs(Fp - Ft)
+        masked = mag_diff * mask
+
+        # print("FFT masked mean:", masked.mean().item())  # debug
+        return masked.mean()
+
+
+
+    @torch.no_grad()
+    def update_ema(self):
+        """Update the EMA generator: ema = decay * ema + (1 - decay) * G."""
+        if not self.use_ema:
+            return
+        ema_params = dict(self.netG_ema.named_parameters())
+        for name, param in self.netG.named_parameters():
+            ema_params[name].mul_(self.ema_decay_g).add_(param.data, alpha=1 - self.ema_decay_g)
+
+        ema_buffers = dict(self.netG_ema.named_buffers())
+        for name, buffer in self.netG.named_buffers():
+            ema_buffers[name].copy_(buffer)
 
     def optimize_parameters(self):
         self.forward()
@@ -416,73 +426,19 @@ class ResViT_model(BaseModel):
         self.backward_G()
         self.optimizer_G.step()
 
+        self.update_ema()
+
     def get_current_errors(self):
         return OrderedDict([('G_GAN', self.loss_G_GAN.item()),
                             ('G_L1', self.loss_G_L1.item()),
                             ('G_diff_map', self.loss_G_diffmap.item()),
-                            # ('G_Focus_L1', self.loss_G_focus.item()),
+                            ('G_FFT', self.loss_G_fft.item()),
+                            ('G_edge_loss', self.loss_G_edge.item()),
                             ('D_real', self.loss_D_real.item()),
                             ('D_fake', self.loss_D_fake.item())
                             ])
 
 
-    # def get_current_visuals(self):
-    #     real_A = util.tensor2im(self.real_A.data)
-    #     # real_T1 = np.stack([real_A[:, :, 0], real_A[:, :, 1], real_A[:, :, 0]], axis=-1)  # Shape (256, 256, 3)
-    #     # real_T2 = np.stack([real_A[:, :, 1], real_A[:, :, 0], real_A[:, :, 0]], axis=-1)  # Shape (256, 256, 3)
-    #     # Extract T1 and T2 from real_A
-    #     T1 = real_A[:, :, 0]  # First channel
-    #     T2 = real_A[:, :, 1]  # Second channel
-    #     # Flair = real_A[:, :, 3] 
-
-    #     # Map to RGB representations
-    #     real_T1 = np.stack([T1, T1, T1], axis=-1)  # Grayscale as RGB
-    #     real_T2 = np.stack([T2, T2, T2], axis=-1)  # Grayscale as RGB
-    #     # real_Flair = np.stack([Flair, Flair, Flair], axis=-1)  # Grayscale as RGB
-        
-    #     # T1_flipped = np.flip(real_T1, axis=1)  # Flip along width (horizontal flip)
-    #     # T2_flipped = np.flip(real_T2, axis=1)  # Flip along width
-    #     # Flair_flipped = np.flip(real_Flair, axis=1)  # Flip along width
-
-    #     fake_B = util.tensor2im(self.fake_B.data)
-    #     real_B = util.tensor2im(self.real_B.data)
-    #     return OrderedDict([('T1', real_T1),('T2', real_T2), ('Pred_T1ce', fake_B), ('real_T1ce', real_B)])
-
-
-
-    # def get_current_visuals(self):
-    #     real_A = util.tensor2im(self.real_A.data)
-
-    #     # Extract T1 and T2
-    #     T1 = real_A[:, :, 0]
-    #     T2 = real_A[:, :, 1]
-
-    #     real_T1 = np.stack([T1, T1, T1], axis=-1)
-    #     real_T2 = np.stack([T2, T2, T2], axis=-1)
-
-    #     fake_B = util.tensor2im(self.fake_B.data)
-    #     real_B = util.tensor2im(self.real_B.data)
-
-    #     diff_map = np.abs(fake_B.astype(np.float32) - real_B.astype(np.float32))
-    #     diff_map = (diff_map - diff_map.min()) / (diff_map.max() - diff_map.min() + 1e-8) * 255
-    #     diff_map = diff_map.astype(np.uint8)
-
-    #     # Handle missing saliency map
-    #     if self.saliency is None:
-    #         saliency_map = np.zeros_like(real_B)  # Black placeholder
-    #     else:
-    #         saliency_map = (self.saliency * 255).astype(np.uint8)  # Convert to image format
-
-    #     visuals = OrderedDict([
-    #         ('T1', real_T1),
-    #         ('T2', real_T2),
-    #         ('real_T1ce', real_B),
-    #         ('Pred_T1ce', fake_B),
-    #         ('Diff_Map', diff_map),
-    #         ('Saliency_Map', saliency_map)
-    #     ])
-
-    #     return visuals
 
     def get_current_visuals(self):
         real_A = util.tensor2im(self.real_A.data)
@@ -531,25 +487,16 @@ class ResViT_model(BaseModel):
             ('FLAIR',real_Flair),
             ('real_T1ce', real_B),
             ('Pred_T1ce', fake_B),
-            ('Diff_Map', diff_map),
-            ('Saliency_Map', saliency_map_vis)
+            ('Diff_Map', diff_map)
+            # ('Saliency_Map', saliency_map_vis)
         ])
 
         return visuals
 
 
-
-#         return OrderedDict([
-#             ('T1', real_T1),
-#             ('T2', real_T2),
-#             ('real_T1ce', real_B),
-#             ('Pred_T1ce', fake_B),
-#             ('Diff_Map', diff_map),
-#             ('Saliency_Map', saliency_map)  # Add saliency map here
-#         ])
-
-
-
     def save(self, label):
         self.save_network(self.netG, 'G', label, self.gpu_ids)
         self.save_network(self.netD, 'D', label, self.gpu_ids)
+        if self.use_ema:
+            self.save_network(self.netG_ema, 'G_ema', label, self.gpu_ids)
+        

@@ -1,7 +1,18 @@
-# ResViT
-Official Pytorch Implementation of Residual Vision Transformers(ResViT) which is described in the [following](https://ieeexplore.ieee.org/document/9758823) paper:
+# AA-ViT
+Official PyTorch Implementation of **AA-ViT (Anatomically Aware Vision Transformer)**, a model for contrast-enhanced brain MRI synthesis built on top of the **ResViT** baseline. AA-ViT is described in our MIUA 2026 (METIS Workshop) paper:
 
-O. Dalmaz, M. Yurt and T. Çukur, "ResViT: Residual Vision Transformers for Multimodal Medical Image Synthesis," in IEEE Transactions on Medical Imaging, vol. 41, no. 10, pp. 2598-2614, Oct. 2022, doi: 10.1109/TMI.2022.3167808.
+O. T. Meraj, T. Flannery, C. Cummins, M. Townend, T. C. Booth, P. Crossley, M. McCann, I. Overton and S. Unnikrishnan, "AA-ViT: Anatomically Aware Vision Transformer with Structural and Frequency Guidance for Contrast Enhanced Brain MRI Synthesis," accepted at MIUA 2026, METIS Workshop. Preprint: [arXiv:2607.07553](https://arxiv.org/abs/2607.07553).
+
+> This is a preprint citation — it will be updated to the camera-ready conference proceedings once published.
+
+<img src="aa_vit_architecture.png" width="800px"/>
+
+*Overview of the proposed AA-ViT framework. (A) Generator–discriminator architecture for synthesizing contrast-enhanced MRI (CEMRI) from pre-contrast MRI inputs. (B) Residual Dense Edge Block (RDEB) for gradient-based edge feature representation. (C) Multi-component anatomically aware training objective.*
+
+## Acknowledgments / Baseline
+AA-ViT builds on **ResViT (Residual Vision Transformers)** as its baseline architecture, described in:
+
+O. Dalmaz, M. Yurt and T. Çukur, "ResViT: Residual Vision Transformers for Multimodal Medical Image Synthesis," in IEEE Transactions on Medical Imaging, vol. 41, no. 10, pp. 2598-2614, Oct. 2022, doi: 10.1109/TMI.2022.3167808. [[paper]](https://ieeexplore.ieee.org/document/9758823) [[code]](https://github.com/icon-lab/ResViT)
 
 <img src="main_fig.png" width="600px"/>
 
@@ -22,8 +33,8 @@ cuda=>11.2
 ## Installation
 - Clone this repo:
 ```bash
-git clone https://github.com/icon-lab/ResViT
-cd ResViT
+git clone https://github.com/TalhaMeraj/resvit
+cd resvit
 ```
 
 ## Download pre-trained ViT models from Google
@@ -129,7 +140,23 @@ python3 test.py --dataroot Datasets/IXI/T1_T2/ --name T1_T2_IXI_resvit --gpu_ids
 --results_dir results/ --checkpoints_dir checkpoints/ --which_epoch latest
 ```
 # Citation
-You are encouraged to modify/distribute this code. However, please acknowledge this code and cite the paper appropriately.
+You are encouraged to modify/distribute this code. However, please acknowledge this code and cite both the AA-ViT paper and the ResViT baseline it builds upon.
+
+**AA-ViT (ours, preprint — MIUA 2026, METIS Workshop):**
+```
+@misc{meraj2026aavit,
+  title={AA-ViT: Anatomically Aware Vision Transformer with Structural and Frequency Guidance for Contrast Enhanced Brain MRI Synthesis},
+  author={Meraj, Talha and Flannery, Tom and Cummins, Charlie and Townend, Matt and Booth, Thomas C. and Crossley, Peter and McCann, Michael and Overton, Ian and Unnikrishnan, Saritha},
+  year={2026},
+  eprint={2607.07553},
+  archivePrefix={arXiv},
+  primaryClass={cs.CV},
+  note={Accepted at MIUA 2026, METIS Workshop. Preprint -- will be updated to the conference proceedings citation once published.},
+  url={https://arxiv.org/abs/2607.07553}
+}
+```
+
+**ResViT (baseline):**
 ```
 @ARTICLE{9758823,
   author={Dalmaz, Onat and Yurt, Mahmut and Çukur, Tolga},
@@ -141,9 +168,10 @@ You are encouraged to modify/distribute this code. However, please acknowledge t
   pages={2598-2614},
   doi={10.1109/TMI.2022.3167808}}
 ```
-For any questions, comments and contributions, please contact Onat Dalmaz (onat[at]ee.bilkent.edu.tr) <br />
+For questions, comments and contributions regarding AA-ViT, please contact Talha Meraj (talhameraj32[at]gmail.com). <br />
+For questions regarding the original ResViT baseline, please contact Onat Dalmaz (onat[at]ee.bilkent.edu.tr). <br />
 
-(c) ICON Lab 2021
+(c) ICON Lab 2021 (original ResViT code). AA-ViT extensions (c) 2026 Talha Meraj et al.
 
 ## Acknowledgments
-This code uses libraries from [pGAN](https://github.com/icon-lab/pGAN-cGAN) and [pix2pix](https://github.com/junyanz/pytorch-CycleGAN-and-pix2pix) repository.
+This code builds on [ResViT](https://github.com/icon-lab/ResViT), which itself uses libraries from [pGAN](https://github.com/icon-lab/pGAN-cGAN) and [pix2pix](https://github.com/junyanz/pytorch-CycleGAN-and-pix2pix) repository.

@@ -10,4 +10,6 @@ class TestOptions(BaseOptions):
         self.parser.add_argument('--phase', type=str, default='test', help='train, val, test, etc')
         self.parser.add_argument('--which_epoch', type=str, default='latest', help='which epoch to load? set to latest to use latest cached model')
         self.parser.add_argument('--how_many', type=int, default=50, help='how many test images to run')
+        self.parser.add_argument('--no_ema', action='store_true', help='do *not* use the EMA generator checkpoint for inference (falls back to the raw G weights)')
+        self.parser.add_argument('--ema_decay_g', type=float, default=0.999, help='decay rate the generator EMA was trained with (only used to initialize the EMA module before loading the checkpoint)')
         self.isTrain = False

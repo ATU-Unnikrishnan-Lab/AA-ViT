@@ -36,4 +36,6 @@ class TrainOptions(BaseOptions):
         self.parser.add_argument('--lambda_vgg', type=float, default=1.0, help='weight for vgg loss')
         self.parser.add_argument('--vgg_layer', type=float, default=2, help='layer of vgg for perc loss')
         self.parser.add_argument('--lambda_adv', type=float, default=1.0, help='weight for adversarial loss')
-        self.parser.add_argument('--lambda_diffmap', type=float, default=10, help='weight for difference map')
+
+        self.parser.add_argument('--no_ema', action='store_true', help='do *not* maintain an exponential moving average (EMA) copy of the generator weights for inference')
+        self.parser.add_argument('--ema_decay_g', type=float, default=0.999, help='decay rate for the generator EMA (closer to 1 = slower/smoother averaging)')

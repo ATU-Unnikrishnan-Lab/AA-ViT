@@ -17,7 +17,7 @@ from torch.nn.modules.utils import _pair
 import torch.nn.functional as F
 from scipy import ndimage
 from . import transformer_configs as configs
-
+from torch.utils.checkpoint import checkpoint
 
 logger = logging.getLogger(__name__)
 
@@ -340,101 +340,180 @@ class ART_block(nn.Module):
         x = self.residual_cnn(x)
         return x
 
-########Generator############
+
+# ---- Residual Dense Edge Block (RDEB) ----
+class ResidualDenseEdgeBlock(nn.Module):
+    """
+    Residual Dense Block with an explicit (fixed) Sobel-based edge branch fused back.
+    - in_channels: number of channels entering the block
+    - growth_rate: channels added per dense layer
+    - num_layers: number of dense conv layers
+    """
+    def __init__(self, in_channels, growth_rate=32, num_layers=3):
+        super(ResidualDenseEdgeBlock, self).__init__()
+        self.in_channels = in_channels
+        self.growth_rate = growth_rate
+        self.num_layers = num_layers
+
+        # Dense conv layers (Conv3x3 -> ReLU) with concatenation
+        self.convs = nn.ModuleList()
+        for i in range(num_layers):
+            in_ch = in_channels + i * growth_rate
+            self.convs.append(nn.Conv2d(in_ch, growth_rate, kernel_size=3, padding=1))
+
+        # Local feature fusion: reduce concatenated features back to in_channels
+        total_feats = in_channels + num_layers * growth_rate
+        # we'll also append edge channels into fusion, so + in_channels
+        self.lff = nn.Conv2d(total_feats + in_channels, in_channels, kernel_size=1)
+
+        # Fixed Sobel filters for edge extraction (grouped conv)
+        sobel_x = torch.tensor([[1,0,-1],[2,0,-2],[1,0,-1]], dtype=torch.float32).view(1,1,3,3)
+        sobel_y = torch.tensor([[1,2,1],[0,0,0],[-1,-2,-1]], dtype=torch.float32).view(1,1,3,3)
+        # We'll register them as buffers, and use grouped conv to compute per-channel gradient magnitude
+        self.register_buffer("sobel_x", sobel_x)
+        self.register_buffer("sobel_y", sobel_y)
+
+        # small 1x1 conv to project edge map into feature space
+        self.edge_proj = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+
+        # learnable scalar to balance edge strength if desired
+        self.alpha = nn.Parameter(torch.tensor(0.5))
+
+        # initialization
+        for m in self.convs:
+            nn.init.kaiming_normal_(m.weight, a=0.2)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        nn.init.kaiming_normal_(self.lff.weight, a=0.2)
+        if self.lff.bias is not None:
+            nn.init.zeros_(self.lff.bias)
+        nn.init.kaiming_normal_(self.edge_proj.weight, a=0.2)
+        if self.edge_proj.bias is not None:
+            nn.init.zeros_(self.edge_proj.bias)
+
+    def forward(self, x):
+        # x: [B, C, H, W]
+        residual = x
+
+        # Dense path
+        feats = [x]
+        for conv in self.convs:
+            cat = torch.cat(feats, dim=1)
+            out = F.relu(conv(cat), inplace=True)
+            feats.append(out)
+        dense_cat = torch.cat(feats, dim=1)  # [B, in_ch + num_layers*growth, H, W]
+
+        # Edge extraction: compute per-channel gradient magnitude
+        # build grouped sobel kernels for dx/dy
+        B, C, H, W = x.shape
+        # expand sobel into shape (C,1,3,3) to use grouped conv (each channel separately)
+        kx = self.sobel_x.expand(C, 1, 3, 3)
+        ky = self.sobel_y.expand(C, 1, 3, 3)
+        gx = F.conv2d(x, weight=kx, bias=None, stride=1, padding=1, groups=C)
+        gy = F.conv2d(x, weight=ky, bias=None, stride=1, padding=1, groups=C)
+        edge = torch.sqrt(gx * gx + gy * gy + 1e-6)  # [B,C,H,W]
+
+        edge_feat = self.edge_proj(edge)  # project to in_channels
+
+        # fuse dense features + edge
+        fused = torch.cat([dense_cat, edge_feat], dim=1)  # [B, total_feats + C, H, W]
+        fused = self.lff(fused)  # back to in_channels
+
+        out = residual + fused + self.alpha * edge_feat
+        return out
+
+
+
+
+# Proposed Generator here
 class ResViT(nn.Module):
-    def __init__(self,config, input_dim, img_size=224, output_dim=3, vis=False):
+    def __init__(self, config, input_dim, img_size=224, output_dim=3, vis=False):
         super(ResViT, self).__init__()
         self.transformer_encoder = Encoder(config, vis)
         self.config = config
+
         output_nc = output_dim
         ngf = 64
         use_bias = False
         norm_layer = nn.BatchNorm2d
-        padding_type = 'reflect'
-        mult = 4
 
-        ############################################################################################
-        # Layer1-Encoder1
-        model = [nn.ReflectionPad2d(3),
-                 nn.Conv2d(input_dim, ngf, kernel_size=7, padding=0,
-                           bias=use_bias),
-                 norm_layer(ngf),
-                 nn.ReLU(True)]
-        setattr(self, 'encoder_1', nn.Sequential(*model))
-        ############################################################################################
-        # Layer2-Encoder2
-        n_downsampling = 2
-        model = []
-        i = 0
-        mult = 2 ** i
-        model = [nn.Conv2d(ngf * mult, ngf * mult * 2, kernel_size=3,
-                           stride=2, padding=1, bias=use_bias),
-                 norm_layer(ngf * mult * 2),
-                 nn.ReLU(True)]
-        setattr(self, 'encoder_2', nn.Sequential(*model))
-        ############################################################################################
-        # Layer3-Encoder3
-        model = []
-        i = 1
-        mult = 2 ** i
-        model = [nn.Conv2d(ngf * mult, ngf * mult * 2, kernel_size=3,
-                           stride=2, padding=1, bias=use_bias),
-                 norm_layer(ngf * mult * 2),
-                 nn.ReLU(True)]
-        setattr(self, 'encoder_3', nn.Sequential(*model))
-        ####################################ART Blocks##############################################
-        mult = 4
-        self.art_1 = ART_block(self.config, input_dim, img_size,transformer = self.transformer_encoder)
-        self.art_2 = ART_block(self.config, input_dim, img_size,transformer = None)
-        self.art_3 = ART_block(self.config, input_dim, img_size, transformer=None)
-        self.art_4 = ART_block(self.config, input_dim, img_size, transformer=None)
-        self.art_5 = ART_block(self.config, input_dim, img_size, transformer=None)
-        self.art_6 = ART_block(self.config, input_dim, img_size,transformer = self.transformer_encoder)
-        self.art_7 = ART_block(self.config, input_dim, img_size, transformer=None)
-        self.art_8 = ART_block(self.config, input_dim, img_size, transformer=None)
-        self.art_9 = ART_block(self.config, input_dim, img_size, transformer=None)
-        ############################################################################################
-        # Layer13-Decoder1
+        # ---------------- Encoders ----------------
+        encoder1 = [
+            nn.ReflectionPad2d(3),
+            nn.Conv2d(input_dim, ngf, kernel_size=7, padding=0, bias=use_bias),
+            norm_layer(ngf),
+            nn.ReLU(True),
+            ResidualDenseEdgeBlock(ngf, growth_rate=32, num_layers=3)
+        ]
+        setattr(self, "encoder_1", nn.Sequential(*encoder1))
+
+        encoder2 = [
+            nn.Conv2d(ngf, ngf * 2, kernel_size=3, stride=2, padding=1, bias=use_bias),
+            norm_layer(ngf * 2),
+            nn.ReLU(True),
+            ResidualDenseEdgeBlock(ngf * 2, growth_rate=32, num_layers=3)
+        ]
+        setattr(self, "encoder_2", nn.Sequential(*encoder2))
+
+        encoder3 = [
+            nn.Conv2d(ngf * 2, ngf * 4, kernel_size=3, stride=2, padding=1, bias=use_bias),
+            norm_layer(ngf * 4),
+            nn.ReLU(True),
+            ResidualDenseEdgeBlock(ngf * 4, growth_rate=32, num_layers=3)
+        ]
+        setattr(self, "encoder_3", nn.Sequential(*encoder3))
+
+        # ---------------- ART blocks ----------------
+        self.art_1 = ART_block(config, input_dim, img_size, transformer=self.transformer_encoder)
+        self.art_2 = ART_block(config, input_dim, img_size, transformer=None)
+        self.art_3 = ART_block(config, input_dim, img_size, transformer=None)
+        self.art_4 = ART_block(config, input_dim, img_size, transformer=None)
+        self.art_5 = ART_block(config, input_dim, img_size, transformer=None)
+        self.art_6 = ART_block(config, input_dim, img_size, transformer=self.transformer_encoder)
+        self.art_7 = ART_block(config, input_dim, img_size, transformer=None)
+        self.art_8 = ART_block(config, input_dim, img_size, transformer=None)
+        self.art_9 = ART_block(config, input_dim, img_size, transformer=None)
+
+        # ---------------- Decoders ----------------
         n_downsampling = 2
         i = 0
         mult = 2 ** (n_downsampling - i)
-        model = []
-        model = [nn.ConvTranspose2d(ngf * mult, int(ngf * mult / 2),
-                                    kernel_size=3, stride=2,
-                                    padding=1, output_padding=1,
-                                    bias=use_bias),
-                 norm_layer(int(ngf * mult / 2)),
-                 nn.ReLU(True)]
-        setattr(self, 'decoder_1', nn.Sequential(*model))
-        ############################################################################################
-        # Layer14-Decoder2
+        decoder1 = [
+            nn.ConvTranspose2d(ngf * mult, int(ngf * mult / 2),
+                               kernel_size=3, stride=2,
+                               padding=1, output_padding=1,
+                               bias=use_bias),
+            norm_layer(int(ngf * mult / 2)),
+            nn.ReLU(True)
+        ]
+        setattr(self, "decoder_1", nn.Sequential(*decoder1))
+
         i = 1
         mult = 2 ** (n_downsampling - i)
-        model = []
-        model = [nn.ConvTranspose2d(ngf * mult, int(ngf * mult / 2),
-                                    kernel_size=3, stride=2,
-                                    padding=1, output_padding=1,
-                                    bias=use_bias),
-                 norm_layer(int(ngf * mult / 2)),
-                 nn.ReLU(True)]
-        setattr(self, 'decoder_2', nn.Sequential(*model))
-        ############################################################################################
-        # Layer15-Decoder3
-        model = []
-        model = [nn.ReflectionPad2d(3)]
-        model += [nn.Conv2d(ngf, output_dim, kernel_size=7, padding=0)]
-        model += [nn.Tanh()]
-        setattr(self, 'decoder_3', nn.Sequential(*model))
+        decoder2 = [
+            nn.ConvTranspose2d(ngf * mult, int(ngf * mult / 2),
+                               kernel_size=3, stride=2,
+                               padding=1, output_padding=1,
+                               bias=use_bias),
+            norm_layer(int(ngf * mult / 2)),
+            nn.ReLU(True)
+        ]
+        setattr(self, "decoder_2", nn.Sequential(*decoder2))
 
-    ############################################################################################
-        
+        decoder3 = [
+            nn.ReflectionPad2d(3),
+            nn.Conv2d(ngf, output_dim, kernel_size=7, padding=0),
+            nn.Tanh()
+        ]
+        setattr(self, "decoder_3", nn.Sequential(*decoder3))
+
     def forward(self, x):
-        # Pass input through cnn encoder of ResViT
+        # Encoder
         x = self.encoder_1(x)
         x = self.encoder_2(x)
         x = self.encoder_3(x)
 
-        #Information Bottleneck
+        # Bottleneck (ART stack)
         x = self.art_1(x)
         x = self.art_2(x)
         x = self.art_3(x)
@@ -445,11 +524,126 @@ class ResViT(nn.Module):
         x = self.art_8(x)
         x = self.art_9(x)
 
-        #decoder
+        # Decoder
         x = self.decoder_1(x)
         x = self.decoder_2(x)
-        x = self.decoder_3(x)
-        return x
+        # Final image
+        out_img = self.decoder_3(x)     # [B, output_dim, H, W]
+
+        return out_img
+
+
+
+# ########Generator############
+# class ResViT(nn.Module):
+#     def __init__(self,config, input_dim, img_size=224, output_dim=3, vis=False):
+#         super(ResViT, self).__init__()
+#         self.transformer_encoder = Encoder(config, vis)
+#         self.config = config
+#         output_nc = output_dim
+#         ngf = 64
+#         use_bias = False
+#         norm_layer = nn.BatchNorm2d
+#         padding_type = 'reflect'
+#         mult = 4
+
+#         ############################################################################################
+#         # Layer1-Encoder1
+#         model = [nn.ReflectionPad2d(3),
+#                  nn.Conv2d(input_dim, ngf, kernel_size=7, padding=0,
+#                            bias=use_bias),
+#                  norm_layer(ngf),
+#                  nn.ReLU(True)]
+#         setattr(self, 'encoder_1', nn.Sequential(*model))
+#         ############################################################################################
+#         # Layer2-Encoder2
+#         n_downsampling = 2
+#         model = []
+#         i = 0
+#         mult = 2 ** i
+#         model = [nn.Conv2d(ngf * mult, ngf * mult * 2, kernel_size=3,
+#                            stride=2, padding=1, bias=use_bias),
+#                  norm_layer(ngf * mult * 2),
+#                  nn.ReLU(True)]
+#         setattr(self, 'encoder_2', nn.Sequential(*model))
+#         ############################################################################################
+#         # Layer3-Encoder3
+#         model = []
+#         i = 1
+#         mult = 2 ** i
+#         model = [nn.Conv2d(ngf * mult, ngf * mult * 2, kernel_size=3,
+#                            stride=2, padding=1, bias=use_bias),
+#                  norm_layer(ngf * mult * 2),
+#                  nn.ReLU(True)]
+#         setattr(self, 'encoder_3', nn.Sequential(*model))
+#         ####################################ART Blocks##############################################
+#         mult = 4
+#         self.art_1 = ART_block(self.config, input_dim, img_size,transformer = self.transformer_encoder)
+#         self.art_2 = ART_block(self.config, input_dim, img_size,transformer = None)
+#         self.art_3 = ART_block(self.config, input_dim, img_size, transformer=None)
+#         self.art_4 = ART_block(self.config, input_dim, img_size, transformer=None)
+#         self.art_5 = ART_block(self.config, input_dim, img_size, transformer=None)
+#         self.art_6 = ART_block(self.config, input_dim, img_size,transformer = self.transformer_encoder)
+#         self.art_7 = ART_block(self.config, input_dim, img_size, transformer=None)
+#         self.art_8 = ART_block(self.config, input_dim, img_size, transformer=None)
+#         self.art_9 = ART_block(self.config, input_dim, img_size, transformer=None)
+#         ############################################################################################
+#         # Layer13-Decoder1
+#         n_downsampling = 2
+#         i = 0
+#         mult = 2 ** (n_downsampling - i)
+#         model = []
+#         model = [nn.ConvTranspose2d(ngf * mult, int(ngf * mult / 2),
+#                                     kernel_size=3, stride=2,
+#                                     padding=1, output_padding=1,
+#                                     bias=use_bias),
+#                  norm_layer(int(ngf * mult / 2)),
+#                  nn.ReLU(True)]
+#         setattr(self, 'decoder_1', nn.Sequential(*model))
+#         ############################################################################################
+#         # Layer14-Decoder2
+#         i = 1
+#         mult = 2 ** (n_downsampling - i)
+#         model = []
+#         model = [nn.ConvTranspose2d(ngf * mult, int(ngf * mult / 2),
+#                                     kernel_size=3, stride=2,
+#                                     padding=1, output_padding=1,
+#                                     bias=use_bias),
+#                  norm_layer(int(ngf * mult / 2)),
+#                  nn.ReLU(True)]
+#         setattr(self, 'decoder_2', nn.Sequential(*model))
+#         ############################################################################################
+#         # Layer15-Decoder3
+#         model = []
+#         model = [nn.ReflectionPad2d(3)]
+#         model += [nn.Conv2d(ngf, output_dim, kernel_size=7, padding=0)]
+#         model += [nn.Tanh()]
+#         setattr(self, 'decoder_3', nn.Sequential(*model))
+
+#     ############################################################################################
+        
+#     def forward(self, x):
+#         # Pass input through cnn encoder of ResViT
+#         x = self.encoder_1(x)
+#         x = self.encoder_2(x)
+#         x = self.encoder_3(x)
+
+#         #Information Bottleneck
+#         x = self.art_1(x)
+#         x = self.art_2(x)
+#         x = self.art_3(x)
+#         x = self.art_4(x)
+#         x = self.art_5(x)
+#         x = self.art_6(x)
+#         x = self.art_7(x)
+#         x = self.art_8(x)
+#         x = self.art_9(x)
+
+#         #decoder
+#         x = self.decoder_1(x)
+#         x = self.decoder_2(x)
+#         x = self.decoder_3(x)
+#         return x
 
 
     def load_from(self, weights):

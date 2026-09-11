@@ -45,6 +45,12 @@ class BaseOptions():
         self.parser.add_argument('--pre_trained_path', type=str,default='./checkpoints/T1_T2_PD_IXI/latest_net_G.pth',help='path to the pre-trained resnet architecture')
         self.parser.add_argument('--pre_trained_transformer', type=int, default=1,help='Pre-trained ViT or not')
         self.parser.add_argument('--pre_trained_resnet', type=int, default=0,help='Pre-trained residual CNNs or not')
+        self.parser.add_argument('--lambda_diffmap', type=float, default=10.0, help='weight for difference map')
+        self.parser.add_argument('--lambda_edge', type=float, default=10.0, help='weight for Edge Detection')
+        self.parser.add_argument('--lambda_fft', type=float, default=0.05, help='weight for FFT feat')
+        self.parser.add_argument('--lambda_ms', type=float, default=10.0, help='weight for Multiscale')
+
+        
 
         self.initialized = True
 
@@ -56,14 +62,24 @@ class BaseOptions():
 
         str_ids = self.opt.gpu_ids.split(',')
         self.opt.gpu_ids = []
+
         for str_id in str_ids:
             id = int(str_id)
             if id >= 0:
                 self.opt.gpu_ids.append(id)
 
-        # set gpu ids
-        if len(self.opt.gpu_ids) > 0:
+        # Set device
+        if torch.cuda.is_available() and len(self.opt.gpu_ids) > 0:
             torch.cuda.set_device(self.opt.gpu_ids[0])
+            self.opt.device = torch.device('cuda:%d' % self.opt.gpu_ids[0])
+
+        elif torch.backends.mps.is_available():
+            self.opt.device = torch.device('mps')
+            print('Using Apple MPS GPU')
+
+        else:
+            self.opt.device = torch.device('cpu')
+            print('Using CPU')
 
         args = vars(self.opt)
 
